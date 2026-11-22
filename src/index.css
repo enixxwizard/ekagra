@@ -1,0 +1,141 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root,
+  [data-theme="paper"] {
+    --font-display: 'Bricolage Grotesque', 'Plus Jakarta Sans', system-ui, sans-serif;
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+    --df-bg: #FAF9F6;
+    --df-surface: #FFFFFF;
+    --df-surface-muted: #F3F1EC;
+    --df-surface-subtle: #EFECE3;
+    --df-surface-hover: #F0EDE5;
+    --df-border: #E8E5DC;
+    --df-border-strong: #D3CFC2;
+    --df-text: #20211F;
+    --df-text-muted: #6B6D67;
+    --df-text-subtle: #787A72;
+    --df-accent: #B9E769;
+    --df-accent-fg: #20211F;
+    --df-accent-soft: #F0F9E2;
+    --df-accent-soft-fg: #3C6A11;
+    --df-accent-border: #D4ECA9;
+    --df-cta: #20211F;
+    --df-cta-fg: #FAF9F6;
+    --df-break-accent: #4BA3C7;
+    --df-backdrop: rgba(32, 33, 31, 0.42);
+  }
+
+  [data-theme="midnight"] {
+    --df-bg: #141513;
+    --df-surface: #1C1D1A;
+    --df-surface-muted: #181916;
+    --df-surface-subtle: #141513;
+    --df-surface-hover: #242622;
+    --df-border: #2C2D28;
+    --df-border-strong: #3E4039;
+    --df-text: #F5F4EF;
+    --df-text-muted: #A4A69F;
+    --df-text-subtle: #82847C;
+    --df-accent: #B9E769;
+    --df-accent-fg: #141513;
+    --df-accent-soft: #222B1B;
+    --df-accent-soft-fg: #B9E769;
+    --df-accent-border: #384B27;
+    --df-cta: #B9E769;
+    --df-cta-fg: #141513;
+    --df-break-accent: #5BB8DC;
+    --df-backdrop: rgba(0, 0, 0, 0.62);
+  }
+
+  [data-theme="slate"] {
+    --df-bg: #12171E;
+    --df-surface: #19202A;
+    --df-surface-muted: #151B24;
+    --df-surface-subtle: #11161D;
+    --df-surface-hover: #212A38;
+    --df-border: #2A3545;
+    --df-border-strong: #3B495E;
+    --df-text: #EDF2F8;
+    --df-text-muted: #9AA8BC;
+    --df-text-subtle: #7B8B9F;
+    --df-accent: #7EB8FA;
+    --df-accent-fg: #0F1722;
+    --df-accent-soft: #1C2D42;
+    --df-accent-soft-fg: #93C5FD;
+    --df-accent-border: #2D4A6E;
+    --df-cta: #7EB8FA;
+    --df-cta-fg: #0F1722;
+    --df-break-accent: #5EEAD4;
+    --df-backdrop: rgba(9, 13, 20, 0.65);
+  }
+
+  [data-theme="sand"] {
+    --df-bg: #F4EFE6;
+    --df-surface: #FCF9F4;
+    --df-surface-muted: #ECE4D7;
+    --df-surface-subtle: #E6DDD0;
+    --df-surface-hover: #E9E1D3;
+    --df-border: #DFD5C5;
+    --df-border-strong: #C7BA9E;
+    --df-text: #27221C;
+    --df-text-muted: #695F52;
+    --df-text-subtle: #7C7163;
+    --df-accent: #BDD186;
+    --df-accent-fg: #27221C;
+    --df-accent-soft: #E9EEDB;
+    --df-accent-soft-fg: #3C4D22;
+    --df-accent-border: #C8D4AD;
+    --df-cta: #27221C;
+    --df-cta-fg: #FAF6EF;
+    --df-break-accent: #4F8FA8;
+    --df-backdrop: rgba(39, 34, 28, 0.42);
+  }
+
+  html {
+    font-family: var(--font-sans);
+    scroll-behavior: smooth;
+    background-color: var(--df-bg);
+    color: var(--df-text);
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono,
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--df-accent);
+    outline-offset: 2px;
+  }
+}
+
+@keyframes sheetSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-sheet-up {
+  animation: sheetSlideUp 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

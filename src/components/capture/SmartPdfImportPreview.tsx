@@ -1,0 +1,1018 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  Calendar,
+  CalendarDays,
+  Check,
+  CheckSquare,
+  Coffee,
+  Edit3,
+  NotebookPen,
+  Sparkles,
+  Target,
+  X,
+} from 'lucide-react';
+import type { StructuredPdfImportPayload, StructuredPdfImportResult } from '../../context/DayFlowContext';
+import type { ActivityCategory, ScheduleActivity, TimeFormat } from '../../types/dayflow';
+import type {
+  PdfDailyPlanItem,
+  PdfDeadlineItem,
+  PdfDocumentType,
+  PdfMonthlyGoalItem,
+  PdfWeeklyPlanItem,
+  StructuredPdfPlan,
+} from '../../types/pdfSchedule';
+import { formatTimeDisplay, getLocalTimeZoneName, getTodayISO } from '../../utils/dateTime';
+import {
+  MON_TO_SUN_ORDER,
+  WEEKDAY_FULL_NAMES,
+  WEEKDAY_SHORT_NAMES,
+} from '../../utils/pdfSchemaValidator';
+import {
+  describeRecurrence,
+  detectRecurringScheduleConflicts,
+  groupWeeklyPlansIntoScheduleActivities,
+} from '../../utils/recurrence';
+
+const CATEGORIES: ActivityCategory[] = [
+  'Study',
+  'Work',
+  'Deep Focus',
+  'Health',
+  'Personal',
+  'Admin',
+];
+
+type PreviewTab = 'weekly' | 'daily' | 'monthly' | 'deadlines';
+type WeeklyScopeMode = 'full' | 'selected_days' | 'one_day';
+
+interface SmartPdfImportPreviewProps {
+  plan: StructuredPdfPlan;
+  onUpdatePlan: (updater: (prev: StructuredPdfPlan) => StructuredPdfPlan) => void;
+  existingActivities: ScheduleActivity[];
+  timeFormat: TimeFormat;
+  onImport: (payload: StructuredPdfImportPayload) => StructuredPdfImportResult;
+  onNotify: (msg: { type: 'success' | 'info' | 'warning'; title: string; description?: string }) => void;
+}
+
+const DOC_TYPE_LABELS: Record<PdfDocumentType, string> = {
+  daily: 'One-Day Schedule',
+  weekly: 'Recurring Weekly Timetable',
+  monthly: 'Monthly Study Roadmap',
+  deadlines: 'Deadlines & Assignments',
+  mixed: 'Mixed Planning Document',
+};
+
+export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
+  plan,
+  onUpdatePlan,
+  existingActivities,
+  timeFormat,
+  onImport,
+  onNotify,
+}) => {
+  const todayISO = getTodayISO();
+  const timeZone = getLocalTimeZoneName();
+
+  const [activeTab, setActiveTab] = useState<PreviewTab>('weekly');
+  const [scopeMode, setScopeMode] = useState<WeeklyScopeMode>('full');
+  const [selectedDays, setSelectedDays] = useState<number[]>([1, 2, 3, 4, 5, 6]);
+  const [oneDayTarget, setOneDayTarget] = useState<number>(1);
+  const [includeBreaks, setIncludeBreaks] = useState<boolean>(false);
+  const [startDate, setStartDate] = useState<string>(todayISO);
+  const [endDate, setEndDate] = useState<string>('');
+  const [editingWeeklyId, setEditingWeeklyId] = useState<string | null>(null);
+  const [importedSections, setImportedSections] = useState<Record<PreviewTab, boolean>>({
+    weekly: false,
+    daily: false,
+    monthly: false,
+    deadlines: false,
+  });
+
+  // Sync default active tab & detected weekdays whenever a new plan arrives
+  useEffect(() => {
+    if (plan.weeklyPlans.length > 0) setActiveTab('weekly');
+    else if (plan.dailyPlans.length > 0) setActiveTab('daily');
+    else if (plan.monthlyGoals.length > 0) setActiveTab('monthly');
+    else if (plan.deadlines.length > 0) setActiveTab('deadlines');
+    else setActiveTab('weekly');
+
+    const detectedDays = Array.from(new Set(plan.weeklyPlans.map((w) => w.weekday)));
+    if (detectedDays.length > 0) {
+      setSelectedDays(detectedDays);
+      setOneDayTarget(detectedDays.includes(1) ? 1 : detectedDays[0]);
+    } else {
+      setSelectedDays([1, 2, 3, 4, 5, 6]);
+    }
+
+    const firstStart = plan.weeklyPlans.find((w) => w.startDate)?.startDate;
+    const firstEnd = plan.weeklyPlans.find((w) => w.endDate)?.endDate;
+    setStartDate(firstStart ?? todayISO);
+    setEndDate(firstEnd ?? '');
+    setScopeMode('full');
+    setEditingWeeklyId(null);
+    setImportedSections({ weekly: false, daily: false, monthly: false, deadlines: false });
+  }, [plan.documentHash, plan.analysisSource, todayISO]);
+
+  const effectiveSelectedWeekdays = useMemo(() => {
+    if (scopeMode === 'one_day') {
+      return [oneDayTarget];
+    }
+    if (scopeMode === 'full') {
+      const detected = Array.from(
+        new Set(plan.weeklyPlans.filter((w) => w.included).map((w) => w.weekday))
+      );
+      return detected.length > 0 ? detected : selectedDays;
+    }
+    return selectedDays;
+  }, [scopeMode, oneDayTarget, plan.weeklyPlans, selectedDays]);
+
+  const previewGroupedRules = useMemo(() => {
+    return groupWeeklyPlansIntoScheduleActivities(plan.weeklyPlans, plan.breakPeriods, {
+      selectedWeekdays: effectiveSelectedWeekdays,
+      includeBreaks,
+      oneDayOnly: scopeMode === 'one_day',
+      startDate: startDate || todayISO,
+      endDate: endDate || null,
+      sourceFile: plan.fileName,
+      timeZone,
+    });
+  }, [
+    plan.weeklyPlans,
+    plan.breakPeriods,
+    plan.fileName,
+    effectiveSelectedWeekdays,
+    includeBreaks,
+    scopeMode,
+    startDate,
+    endDate,
+    todayISO,
+    timeZone,
+  ]);
+
+  const weeklyConflicts = useMemo(() => {
+    if (previewGroupedRules.length === 0) return [];
+    return detectRecurringScheduleConflicts(
+      previewGroupedRules,
+      existingActivities,
+      startDate || todayISO
+    );
+  }, [previewGroupedRules, existingActivities, startDate, todayISO]);
+
+  const updateWeeklyItem = (id: string, patch: Partial<PdfWeeklyPlanItem>) => {
+    onUpdatePlan((prev) => ({
+      ...prev,
+      weeklyPlans: prev.weeklyPlans.map((item) =>
+        item.id === id ? { ...item, ...patch } : item
+      ),
+    }));
+  };
+
+  const updateDailyItem = (id: string, patch: Partial<PdfDailyPlanItem>) => {
+    onUpdatePlan((prev) => ({
+      ...prev,
+      dailyPlans: prev.dailyPlans.map((item) =>
+        item.id === id ? { ...item, ...patch } : item
+      ),
+    }));
+  };
+
+  const updateMonthlyGoal = (id: string, patch: Partial<PdfMonthlyGoalItem>) => {
+    onUpdatePlan((prev) => ({
+      ...prev,
+      monthlyGoals: prev.monthlyGoals.map((item) =>
+        item.id === id ? { ...item, ...patch } : item
+      ),
+    }));
+  };
+
+  const updateDeadlineItem = (id: string, patch: Partial<PdfDeadlineItem>) => {
+    onUpdatePlan((prev) => ({
+      ...prev,
+      deadlines: prev.deadlines.map((item) =>
+        item.id === id ? { ...item, ...patch } : item
+      ),
+    }));
+  };
+
+  const toggleDaySelection = (dayNum: number) => {
+    if (scopeMode === 'one_day') {
+      setOneDayTarget(dayNum);
+      return;
+    }
+    if (scopeMode === 'full') {
+      setScopeMode('selected_days');
+    }
+    setSelectedDays((prev) =>
+      prev.includes(dayNum) ? prev.filter((d) => d !== dayNum) : [...prev, dayNum]
+    );
+  };
+
+  const handleImportWeekly = () => {
+    if (previewGroupedRules.length === 0) {
+      onNotify({
+        type: 'info',
+        title: 'Nothing selected to import',
+        description: 'Select at least one weekday and activity slot first.',
+      });
+      return;
+    }
+
+    const res = onImport({
+      sourceFile: plan.fileName,
+      weekly: {
+        items: plan.weeklyPlans,
+        breakPeriods: plan.breakPeriods,
+        selectedWeekdays: effectiveSelectedWeekdays,
+        includeBreaks,
+        oneDayOnly: scopeMode === 'one_day',
+        startDate: startDate || todayISO,
+        endDate: endDate || null,
+      },
+    });
+
+    setImportedSections((prev) => ({ ...prev, weekly: true }));
+    onNotify({
+      type: res.conflictsCount > 0 ? 'warning' : 'success',
+      title: `Imported ${res.activitiesAdded} ${
+        res.recurringRulesAdded > 0 ? 'recurring rule' : 'schedule block'
+      }${res.activitiesAdded === 1 ? '' : 's'}`,
+      description: [
+        res.skippedDuplicates > 0 ? `${res.skippedDuplicates} duplicate skipped` : null,
+        res.conflictsCount > 0 ? `${res.conflictsCount} overlap with existing schedule` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ') || 'Your weekly timetable is now active in Plan & Calendar.',
+    });
+  };
+
+  const handleImportDaily = () => {
+    const selected = plan.dailyPlans.filter((d) => d.included);
+    if (selected.length === 0) {
+      onNotify({ type: 'info', title: 'Select at least one daily activity.' });
+      return;
+    }
+    const res = onImport({
+      sourceFile: plan.fileName,
+      dailyItems: selected,
+    });
+    setImportedSections((prev) => ({ ...prev, daily: true }));
+    onNotify({
+      type: res.conflictsCount > 0 ? 'warning' : 'success',
+      title: `Added ${res.activitiesAdded} daily ${res.activitiesAdded === 1 ? 'activity' : 'activities'}`,
+      description:
+        res.skippedDuplicates > 0
+          ? `${res.skippedDuplicates} duplicate skipped.`
+          : 'Added to your timeline.',
+    });
+  };
+
+  const handleImportMonthly = () => {
+    const selected = plan.monthlyGoals.filter((m) => m.included && m.goals.length > 0);
+    if (selected.length === 0) {
+      onNotify({ type: 'info', title: 'Select at least one monthly roadmap card.' });
+      return;
+    }
+    const res = onImport({
+      sourceFile: plan.fileName,
+      monthlyGoals: selected,
+    });
+    setImportedSections((prev) => ({ ...prev, monthly: true }));
+    onNotify({
+      type: 'success',
+      title: `Saved ${res.notesAdded} monthly roadmap ${res.notesAdded === 1 ? 'note' : 'notes'}`,
+      description: 'Stored in Capture Notes & Quotes without creating fake daily events.',
+    });
+  };
+
+  const handleImportDeadlines = () => {
+    const selected = plan.deadlines.filter((dl) => dl.included);
+    if (selected.length === 0) {
+      onNotify({ type: 'info', title: 'Select at least one deadline or exam.' });
+      return;
+    }
+    const res = onImport({
+      sourceFile: plan.fileName,
+      deadlines: selected,
+    });
+    setImportedSections((prev) => ({ ...prev, deadlines: true }));
+    onNotify({
+      type: 'success',
+      title: `Added ${res.tasksAdded} deadline ${res.tasksAdded === 1 ? 'task' : 'tasks'}`,
+      description: 'Added to your Tasks backlog with original due dates preserved.',
+    });
+  };
+
+  const sourceBadge =
+    plan.analysisSource === 'gemini-multimodal'
+      ? 'Gemini Multimodal'
+      : plan.analysisSource === 'gemini'
+      ? 'Gemini AI'
+      : 'Local table parser';
+
+  const tabs: Array<{ id: PreviewTab; label: string; count: number; icon: React.ReactNode }> = [
+    {
+      id: 'weekly',
+      label: 'Weekly Plan',
+      count: plan.weeklyPlans.length,
+      icon: <CalendarDays className="h-3.5 w-3.5" />,
+    },
+    {
+      id: 'daily',
+      label: 'Daily Plan',
+      count: plan.dailyPlans.length,
+      icon: <Calendar className="h-3.5 w-3.5" />,
+    },
+    {
+      id: 'monthly',
+      label: 'Monthly Goals',
+      count: plan.monthlyGoals.length,
+      icon: <Target className="h-3.5 w-3.5" />,
+    },
+    {
+      id: 'deadlines',
+      label: 'Deadlines',
+      count: plan.deadlines.length,
+      icon: <CheckSquare className="h-3.5 w-3.5" />,
+    },
+  ];
+
+  return (
+    <section className="space-y-4 rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">
+      {/* Classification Header */}
+      <div className="flex flex-col justify-between gap-3 border-b border-[var(--df-border)] pb-4 sm:flex-row sm:items-center">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-display text-lg font-bold text-[var(--df-text)]">
+              Smart Schedule Review
+            </h3>
+            <span className="rounded-lg bg-[var(--df-accent-soft)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--df-accent-soft-fg)]">
+              {DOC_TYPE_LABELS[plan.documentType]}
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-lg bg-[var(--df-surface-subtle)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--df-text)]">
+              {plan.analysisSource !== 'local' && <Sparkles className="h-3 w-3" />}
+              {sourceBadge}
+              {plan.cached ? ' · Cached' : ''}
+            </span>
+          </div>
+          <p className="text-xs text-[var(--df-text-muted)]">
+            Timezone: {timeZone} · Weekly timetables save as compact recurring rules instead of repeated daily duplicates.
+          </p>
+        </div>
+      </div>
+
+      {/* Phase 6 AI Validation & Review Warnings */}
+      {plan.warnings.length > 0 && (
+        <div
+          role="status"
+          className="space-y-1.5 rounded-2xl border border-amber-200 bg-amber-50/70 p-3.5 dark:border-amber-900/50 dark:bg-amber-950/25"
+        >
+          <div className="flex items-center gap-2 text-xs font-semibold text-amber-800 dark:text-amber-300">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            Please review {plan.warnings.length} extraction{' '}
+            {plan.warnings.length === 1 ? 'note' : 'notes'} before importing
+          </div>
+          <ul className="space-y-1 pl-6 text-xs text-[var(--df-text-muted)] list-disc">
+            {plan.warnings.map((w) => (
+              <li key={w.id}>
+                {w.message}
+                {w.sourcePage ? ` (p. ${w.sourcePage})` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* 4 Classification Tabs */}
+      <div className="flex flex-wrap items-center gap-1.5 rounded-2xl bg-[var(--df-surface-subtle)] p-1">
+        {tabs.map((tab) => {
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3.5 text-xs font-semibold transition-colors ${
+                isActive
+                  ? 'bg-[var(--df-surface)] text-[var(--df-text)]'
+                  : 'text-[var(--df-text-muted)] hover:text-[var(--df-text)]'
+              }`}
+            >
+              {tab.icon}
+              <span>{tab.label}</span>
+              <span
+                className={`rounded-md px-1.5 py-0.5 font-mono text-[10px] ${
+                  isActive
+                    ? 'bg-[var(--df-accent-soft)] text-[var(--df-accent-soft-fg)]'
+                    : 'bg-black/5 text-[var(--df-text-muted)] dark:bg-white/10'
+                }`}
+              >
+                {tab.count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* TAB 1: WEEKLY PLAN (Monday–Sunday Timetable) */}
+      {activeTab === 'weekly' && (
+        <div className="space-y-4">
+          {plan.weeklyPlans.length === 0 && plan.breakPeriods.length === 0 ? (
+            <p className="py-8 text-center text-xs text-[var(--df-text-muted)]">
+              No recurring weekly timetable detected. Check the Daily Plan, Monthly Goals, or Deadlines tabs, or click &ldquo;Enhance with Gemini AI&rdquo; above.
+            </p>
+          ) : (
+            <>
+              {/* Weekly Import Controls */}
+              <div className="grid grid-cols-1 gap-3 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-4 lg:grid-cols-12">
+                <div className="space-y-2 lg:col-span-7">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+                      Import scope
+                    </span>
+                    {(
+                      [
+                        { id: 'full', label: 'Full weekly plan' },
+                        { id: 'selected_days', label: 'Selected days' },
+                        { id: 'one_day', label: 'One-day plan' },
+                      ] as const
+                    ).map((mode) => (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() => setScopeMode(mode.id)}
+                        className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors ${
+                          scopeMode === mode.id
+                            ? 'bg-[var(--df-cta)] text-[var(--df-cta-fg)]'
+                            : 'border border-[var(--df-border)] bg-[var(--df-surface)] text-[var(--df-text-muted)] hover:text-[var(--df-text)]'
+                        }`}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {MON_TO_SUN_ORDER.map((dayNum) => {
+                      const active = effectiveSelectedWeekdays.includes(dayNum);
+                      return (
+                        <button
+                          key={dayNum}
+                          type="button"
+                          onClick={() => toggleDaySelection(dayNum)}
+                          className={`min-w-[44px] rounded-lg px-2 py-1 text-xs font-semibold transition-colors ${
+                            active
+                              ? 'bg-[var(--df-accent)] text-[var(--df-accent-fg)]'
+                              : 'border border-[var(--df-border)] bg-[var(--df-surface)] text-[var(--df-text-muted)]'
+                          }`}
+                        >
+                          {WEEKDAY_SHORT_NAMES[dayNum]}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <label className="inline-flex cursor-pointer items-center gap-2 pt-1 text-xs text-[var(--df-text)]">
+                    <input
+                      type="checkbox"
+                      checked={includeBreaks}
+                      onChange={(e) => setIncludeBreaks(e.target.checked)}
+                      className="h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+                    />
+                    <span>
+                      Include Break / Lunch periods ({plan.breakPeriods.length}) as optional unavailable blocks
+                    </span>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5 lg:col-span-5 lg:self-start">
+                  <div>
+                    <label className="block text-[11px] font-medium text-[var(--df-text-muted)]">
+                      Starts on
+                    </label>
+                    <input
+                      type="date"
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.target.value)}
+                      className="mt-1 w-full rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-2 font-mono text-xs text-[var(--df-text)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-[var(--df-text-muted)]">
+                      Ends on (optional)
+                    </label>
+                    <input
+                      type="date"
+                      value={endDate}
+                      disabled={scopeMode === 'one_day'}
+                      onChange={(e) => setEndDate(e.target.value)}
+                      className="mt-1 w-full rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-2 font-mono text-xs text-[var(--df-text)] disabled:opacity-50"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Monday–Sunday Timetable Grid */}
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-7">
+                {MON_TO_SUN_ORDER.map((dayNum) => {
+                  const isDaySelected = effectiveSelectedWeekdays.includes(dayNum);
+                  const dayStudyItems = plan.weeklyPlans
+                    .filter((item) => item.weekday === dayNum)
+                    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+                  const dayBreaks = plan.breakPeriods.filter(
+                    (b) => b.weekdays.length === 0 || b.weekdays.includes(dayNum)
+                  );
+
+                  const combined = [
+                    ...dayStudyItems.map((s) => ({ kind: 'study' as const, startTime: s.startTime, item: s })),
+                    ...dayBreaks.map((b) => ({ kind: 'break' as const, startTime: b.startTime, item: b })),
+                  ].sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+                  return (
+                    <div
+                      key={dayNum}
+                      className={`flex flex-col rounded-2xl border p-2.5 transition-opacity ${
+                        isDaySelected
+                          ? 'border-[var(--df-border)] bg-[var(--df-bg)]'
+                          : 'border-[var(--df-border)] bg-[var(--df-bg)] opacity-50'
+                      }`}
+                    >
+                      <div className="mb-2 flex items-center justify-between border-b border-[var(--df-border)] pb-1.5">
+                        <span className="text-xs font-bold text-[var(--df-text)]">
+                          {WEEKDAY_SHORT_NAMES[dayNum]}
+                        </span>
+                        <span className="font-mono text-[10px] text-[var(--df-text-muted)]">
+                          {dayStudyItems.filter((s) => s.included).length}
+                        </span>
+                      </div>
+
+                      {combined.length === 0 ? (
+                        <p className="py-4 text-center text-[11px] text-[var(--df-text-subtle)]">Rest / open</p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {combined.map((entry) => {
+                            if (entry.kind === 'break') {
+                              const brk = entry.item;
+                              return (
+                                <div
+                                  key={`${dayNum}-${brk.id}`}
+                                  className={`rounded-xl border border-dashed px-2 py-1.5 text-[11px] ${
+                                    includeBreaks && isDaySelected
+                                      ? 'border-[var(--df-accent-border)] bg-[var(--df-accent-soft)] text-[var(--df-accent-soft-fg)]'
+                                      : 'border-[var(--df-border-strong)] bg-[var(--df-surface)] opacity-75 text-[var(--df-text-muted)]'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-1 font-medium">
+                                    <Coffee className="h-3 w-3 shrink-0" />
+                                    <span className="truncate">{brk.title}</span>
+                                  </div>
+                                  <div className="mt-0.5 font-mono text-[10px] opacity-80">
+                                    {formatTimeDisplay(brk.startTime, timeFormat)}–{formatTimeDisplay(brk.endTime, timeFormat)}
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            const item = entry.item;
+                            const isEditing = editingWeeklyId === item.id;
+
+                            return (
+                              <div
+                                key={item.id}
+                                className={`rounded-xl border p-2 text-xs transition-colors ${
+                                  item.included
+                                    ? 'border-[var(--df-border)] bg-[var(--df-surface)]'
+                                    : 'border-dashed border-[var(--df-border-strong)] bg-[var(--df-surface)] opacity-55'
+                                }`}
+                              >
+                                {isEditing ? (
+                                  <div className="space-y-1.5">
+                                    <input
+                                      type="text"
+                                      value={item.title}
+                                      onChange={(e) =>
+                                        updateWeeklyItem(item.id, { title: e.target.value })
+                                      }
+                                      className="w-full rounded-lg border border-[var(--df-border-strong)] bg-[var(--df-bg)] px-1.5 py-1 text-xs font-semibold text-[var(--df-text)]"
+                                    />
+                                    <div className="grid grid-cols-2 gap-1">
+                                      <input
+                                        type="time"
+                                        value={item.startTime}
+                                        onChange={(e) =>
+                                          updateWeeklyItem(item.id, { startTime: e.target.value })
+                                        }
+                                        className="rounded-lg border border-[var(--df-border)] bg-[var(--df-bg)] px-1 py-0.5 font-mono text-[10px] text-[var(--df-text)]"
+                                      />
+                                      <input
+                                        type="time"
+                                        value={item.endTime}
+                                        onChange={(e) =>
+                                          updateWeeklyItem(item.id, { endTime: e.target.value })
+                                        }
+                                        className="rounded-lg border border-[var(--df-border)] bg-[var(--df-bg)] px-1 py-0.5 font-mono text-[10px] text-[var(--df-text)]"
+                                      />
+                                    </div>
+                                    <select
+                                      value={item.weekday}
+                                      onChange={(e) =>
+                                        updateWeeklyItem(item.id, {
+                                          weekday: Number(e.target.value),
+                                        })
+                                      }
+                                      className="w-full rounded-lg border border-[var(--df-border)] bg-[var(--df-bg)] px-1.5 py-1 text-[11px] text-[var(--df-text)]"
+                                    >
+                                      {MON_TO_SUN_ORDER.map((wd) => (
+                                        <option key={wd} value={wd}>
+                                          {WEEKDAY_FULL_NAMES[wd]}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <select
+                                      value={item.category}
+                                      onChange={(e) =>
+                                        updateWeeklyItem(item.id, {
+                                          category: e.target.value as ActivityCategory,
+                                        })
+                                      }
+                                      className="w-full rounded-lg border border-[var(--df-border)] bg-[var(--df-bg)] px-1.5 py-1 text-[11px] text-[var(--df-text)]"
+                                    >
+                                      {CATEGORIES.map((c) => (
+                                        <option key={c} value={c}>
+                                          {c}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingWeeklyId(null)}
+                                      className="w-full rounded-lg bg-[var(--df-cta)] py-1 text-[11px] font-semibold text-[var(--df-cta-fg)]"
+                                    >
+                                      Done
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="flex items-start justify-between gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingWeeklyId(item.id)}
+                                        className="text-left text-xs font-semibold leading-snug text-[var(--df-text)] hover:underline"
+                                      >
+                                        {item.title}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          updateWeeklyItem(item.id, { included: !item.included })
+                                        }
+                                        title={item.included ? 'Exclude slot' : 'Restore slot'}
+                                        className="shrink-0 rounded p-0.5 text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
+                                      >
+                                        {item.included ? (
+                                          <X className="h-3 w-3" />
+                                        ) : (
+                                          <Check className="h-3 w-3" />
+                                        )}
+                                      </button>
+                                    </div>
+                                    <div className="mt-1 flex items-center justify-between gap-1">
+                                      <span className="font-mono text-[10px] text-[var(--df-text-muted)]">
+                                        {formatTimeDisplay(item.startTime, timeFormat)}–{formatTimeDisplay(item.endTime, timeFormat)}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingWeeklyId(item.id)}
+                                        aria-label={`Edit ${item.title}`}
+                                        className="text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
+                                      >
+                                        <Edit3 className="h-2.5 w-2.5" />
+                                      </button>
+                                    </div>
+                                    {item.provenance !== 'explicit' && (
+                                      <span className="mt-1 inline-block rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                                        {item.provenance}
+                                      </span>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Compact Rule Preview + Import Action */}
+              <div className="flex flex-col justify-between gap-3 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-4 sm:flex-row sm:items-center">
+                <div className="space-y-1">
+                  <p className="text-xs font-semibold text-[var(--df-text)]">
+                    Creates {previewGroupedRules.length}{' '}
+                    {scopeMode === 'one_day' ? 'one-time activity' : 'recurring schedule rule'}
+                    {previewGroupedRules.length === 1 ? '' : 's'}
+                  </p>
+                  <p className="text-[11px] text-[var(--df-text-muted)]">
+                    {previewGroupedRules
+                      .slice(0, 3)
+                      .map((r) => `${r.title} (${describeRecurrence(r)})`)
+                      .join(' · ')}
+                    {previewGroupedRules.length > 3 ? ` · +${previewGroupedRules.length - 3} more` : ''}
+                  </p>
+                  {weeklyConflicts.length > 0 && (
+                    <p className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      {weeklyConflicts.length} overlap{weeklyConflicts.length === 1 ? '' : 's'} with your existing schedule (first: &ldquo;{weeklyConflicts[0].incomingTitle}&rdquo; vs &ldquo;{weeklyConflicts[0].existingTitle}&rdquo; on {weeklyConflicts[0].date}).
+                    </p>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleImportWeekly}
+                  disabled={previewGroupedRules.length === 0}
+                  className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-5 text-xs font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  {importedSections.weekly
+                    ? 'Weekly Plan Imported (Import Again)'
+                    : scopeMode === 'one_day'
+                    ? 'Import One-Day Plan'
+                    : 'Import Weekly Plan'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* TAB 2: DAILY PLAN */}
+      {activeTab === 'daily' && (
+        <div className="space-y-3">
+          {plan.dailyPlans.length === 0 ? (
+            <p className="py-8 text-center text-xs text-[var(--df-text-muted)]">
+              No standalone single-date daily events found in this document.
+            </p>
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-[var(--df-text-muted)]">
+                  Specific calendar-date sessions. Unstated dates default to today when imported unless edited.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleImportDaily}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] whitespace-nowrap shrink-0"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  {importedSections.daily ? 'Imported Daily Items' : 'Import Selected Daily'}
+                </button>
+              </div>
+              {plan.dailyPlans.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex flex-col gap-3 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3.5 sm:flex-row sm:items-center"
+                >
+                  <input
+                    type="checkbox"
+                    checked={item.included}
+                    onChange={(e) => updateDailyItem(item.id, { included: e.target.checked })}
+                    className="h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+                  />
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        value={item.title}
+                        onChange={(e) => updateDailyItem(item.id, { title: e.target.value })}
+                        className="min-w-[180px] flex-1 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-sm font-semibold text-[var(--df-text)] focus:border-[var(--df-border-strong)] focus:bg-[var(--df-surface)]"
+                      />
+                      <span className="text-[11px] text-[var(--df-text-muted)]">
+                        p. {item.sourcePage} · {item.date ? `Date: ${item.dateProvenance}` : 'No date stated'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <input
+                        type="date"
+                        value={item.date ?? todayISO}
+                        onChange={(e) =>
+                          updateDailyItem(item.id, {
+                            date: e.target.value,
+                            dateProvenance: 'explicit',
+                          })
+                        }
+                        className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 font-mono text-xs text-[var(--df-text)]"
+                      />
+                      <input
+                        type="time"
+                        value={item.startTime}
+                        onChange={(e) => updateDailyItem(item.id, { startTime: e.target.value })}
+                        className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 font-mono text-xs text-[var(--df-text)]"
+                      />
+                      <input
+                        type="time"
+                        value={item.endTime}
+                        onChange={(e) => updateDailyItem(item.id, { endTime: e.target.value })}
+                        className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 font-mono text-xs text-[var(--df-text)]"
+                      />
+                      <select
+                        value={item.category}
+                        onChange={(e) =>
+                          updateDailyItem(item.id, {
+                            category: e.target.value as ActivityCategory,
+                          })
+                        }
+                        className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 text-xs text-[var(--df-text)]"
+                      >
+                        {CATEGORIES.map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* TAB 3: MONTHLY GOALS */}
+      {activeTab === 'monthly' && (
+        <div className="space-y-3">
+          {plan.monthlyGoals.length === 0 ? (
+            <p className="py-8 text-center text-xs text-[var(--df-text-muted)]">
+              No monthly learning goals or roadmap priorities detected in this document.
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+                <p className="text-xs text-[var(--df-text-muted)]">
+                  Monthly objectives stay as high-level Capture notes—no arbitrary daily calendar slots are invented.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleImportMonthly}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] whitespace-nowrap shrink-0"
+                >
+                  <NotebookPen className="h-3.5 w-3.5" />
+                  {importedSections.monthly ? 'Saved to Notes' : 'Save Selected to Notes'}
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {plan.monthlyGoals.map((mg) => (
+                  <div
+                    key={mg.id}
+                    className="space-y-2.5 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-4"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="inline-flex items-center gap-2 text-sm font-bold text-[var(--df-text)]">
+                        <input
+                          type="checkbox"
+                          checked={mg.included}
+                          onChange={(e) =>
+                            updateMonthlyGoal(mg.id, { included: e.target.checked })
+                          }
+                          className="h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+                        />
+                        <span>
+                          {mg.monthLabel}
+                          {mg.year ? ` ${mg.year}` : ''}
+                        </span>
+                      </label>
+                      <span className="text-[11px] text-[var(--df-text-muted)]">
+                        p. {mg.sourcePage} · {mg.category}
+                      </span>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={mg.goals.join('\n')}
+                      onChange={(e) =>
+                        updateMonthlyGoal(mg.id, {
+                          goals: e.target.value
+                            .split('\n')
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      className="w-full rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] p-2.5 text-xs leading-relaxed text-[var(--df-text)]"
+                    />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* TAB 4: DEADLINES */}
+      {activeTab === 'deadlines' && (
+        <div className="space-y-3">
+          {plan.deadlines.length === 0 ? (
+            <p className="py-8 text-center text-xs text-[var(--df-text-muted)]">
+              No explicit assignments, submissions, or exam deadlines detected.
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+                <p className="text-xs text-[var(--df-text-muted)]">
+                  Saved directly to your Tasks backlog. Missing dates remain blank unless you fill them in.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleImportDeadlines}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] whitespace-nowrap shrink-0"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  {importedSections.deadlines ? 'Added to Tasks' : 'Add Selected to Tasks'}
+                </button>
+              </div>
+              {plan.deadlines.map((dl) => (
+                <div
+                  key={dl.id}
+                  className="flex flex-col gap-3 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3.5 sm:flex-row sm:items-center"
+                >
+                  <input
+                    type="checkbox"
+                    checked={dl.included}
+                    onChange={(e) => updateDeadlineItem(dl.id, { included: e.target.checked })}
+                    className="h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+                  />
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        value={dl.title}
+                        onChange={(e) => updateDeadlineItem(dl.id, { title: e.target.value })}
+                        className="min-w-[200px] flex-1 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-sm font-semibold text-[var(--df-text)] focus:border-[var(--df-border-strong)] focus:bg-[var(--df-surface)]"
+                      />
+                      <span className="rounded bg-[var(--df-surface-subtle)] px-2 py-0.5 text-[10px] font-semibold uppercase text-[var(--df-text)]">
+                        {dl.kind}
+                      </span>
+                      <span className="text-[11px] text-[var(--df-text-muted)]">
+                        p. {dl.sourcePage} · {dl.dueDate ? 'Explicit due date' : 'No date in PDF'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <input
+                        type="date"
+                        value={dl.dueDate ?? ''}
+                        onChange={(e) =>
+                          updateDeadlineItem(dl.id, {
+                            dueDate: e.target.value || null,
+                            provenance: e.target.value ? 'explicit' : 'inferred',
+                          })
+                        }
+                        className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 font-mono text-xs text-[var(--df-text)]"
+                      />
+                      <input
+                        type="time"
+                        value={dl.dueTime ?? ''}
+                        onChange={(e) =>
+                          updateDeadlineItem(dl.id, { dueTime: e.target.value || null })
+                        }
+                        className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 font-mono text-xs text-[var(--df-text)]"
+                      />
+                      <select
+                        value={dl.priority}
+                        onChange={(e) =>
+                          updateDeadlineItem(dl.id, {
+                            priority: e.target.value as PdfDeadlineItem['priority'],
+                          })
+                        }
+                        className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 text-xs text-[var(--df-text)]"
+                      >
+                        <option value="high">High priority</option>
+                        <option value="medium">Medium priority</option>
+                        <option value="low">Low priority</option>
+                      </select>
+                      <select
+                        value={dl.category}
+                        onChange={(e) =>
+                          updateDeadlineItem(dl.id, {
+                            category: e.target.value as ActivityCategory,
+                          })
+                        }
+                        className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 text-xs text-[var(--df-text)]"
+                      >
+                        {CATEGORIES.map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+};

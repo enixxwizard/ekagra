@@ -1,0 +1,6 @@
+{
+  "name": "DayFlow",
+  "description": "DayFlow — Plan Your Day. Own Your Time. A local-first productivity planner, time-blocking scheduler, focus timer, habit tracker, and analytics workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

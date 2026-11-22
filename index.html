@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DayFlow — Plan Your Day. Own Your Time.</title>
+    <meta name="description" content="DayFlow — Less dashboard, more doing. A calm, tactile daily planner, time-blocker, focus timer, and habit companion." />
+    <meta property="og:title" content="DayFlow — Plan Your Day. Own Your Time." />
+    <meta property="og:description" content="Schedule daily activities, manage routines, focus without distractions, and build consistency." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      (function () {
+        try {
+          var mode = window.localStorage.getItem('dayflow_theme_v1');
+          if (!mode) {
+            var raw = window.localStorage.getItem('dayflow_app_state_v1');
+            if (raw) {
+              var parsed = JSON.parse(raw);
+              if (parsed && parsed.settings && parsed.settings.theme) {
+                mode = parsed.settings.theme;
+              }
+            }
+          }
+          if (mode === 'light') mode = 'paper';
+          if (mode === 'dark') mode = 'midnight';
+          if (
+            mode !== 'paper' &&
+            mode !== 'midnight' &&
+            mode !== 'slate' &&
+            mode !== 'sand' &&
+            mode !== 'system'
+          ) {
+            mode = 'paper';
+          }
+          var systemDark =
+            window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var resolved =
+            mode === 'system' ? (systemDark ? 'midnight' : 'paper') : mode;
+          var isDark = resolved === 'midnight' || resolved === 'slate';
+          var root = document.documentElement;
+          root.dataset.theme = resolved;
+          root.classList.toggle('dark', isDark);
+          root.style.colorScheme = isDark ? 'dark' : 'light';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'paper';
+        }
+      })();
+    </script>
+  </head>
+  <body class="bg-[var(--df-bg)] text-[var(--df-text)] antialiased selection:bg-[var(--df-accent)] selection:text-[var(--df-accent-fg)]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
