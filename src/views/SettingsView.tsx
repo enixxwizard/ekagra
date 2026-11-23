@@ -269,10 +269,10 @@ export const SettingsView: React.FC = () => {
                 htmlFor="pref-auto-sync-pdf"
                 className="block cursor-pointer text-sm font-medium text-[var(--df-text)]"
               >
-                Automatically sync imported PDF schedules
+                Strict schedule PDF validation &amp; duplicate guard
               </label>
               <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
-                When enabled, valid dates and times sync straight to your calendar after PDF upload or paste. Conflicts or missing dates pause for review.
+                Schedule PDF imports always require explicit calendar dates, study times, and topics, followed by preview confirmation before adding events.
               </p>
             </div>
             <input

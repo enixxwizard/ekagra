@@ -594,14 +594,21 @@ export function validateAndAuditStructuredPlan(
     const title = typeof obj.title === 'string' ? obj.title.trim() : '';
     if (!title) return;
 
-    const startTime = sanitizeTime24(obj.startTime) ?? '09:00';
-    let endTime = sanitizeTime24(obj.endTime);
-    if (!endTime || timeToMinutes(endTime) <= timeToMinutes(startTime)) {
-      endTime = minutesToHHMM(Math.min(23 * 60 + 55, timeToMinutes(startTime) + 60));
-    }
-
+    const startTime = sanitizeTime24(obj.startTime);
+    const endTime = sanitizeTime24(obj.endTime);
     const sourcePage =
       typeof obj.sourcePage === 'number' && obj.sourcePage >= 1 ? Math.floor(obj.sourcePage) : 1;
+
+    if (!startTime || !endTime || timeToMinutes(endTime) <= timeToMinutes(startTime)) {
+      warnings.push({
+        id: `warn-daily-missing-time-${idx}`,
+        severity: 'warning',
+        section: 'daily',
+        message: `"${title}" does not have a valid explicit start and end time and was excluded.`,
+        sourcePage,
+      });
+      return;
+    }
 
     if (isBreakLabel(title)) {
       breakPeriods.push({
@@ -620,18 +627,25 @@ export function validateAndAuditStructuredPlan(
     }
 
     const explicitDate = sanitizeIsoDate(obj.date);
+    if (!explicitDate) {
+      warnings.push({
+        id: `warn-daily-missing-date-${idx}`,
+        severity: 'warning',
+        section: 'daily',
+        message: `"${title}" has no explicit calendar date and was not assigned an invented date.`,
+        sourcePage,
+      });
+      return;
+    }
+
     dailyPlans.push({
-      id: makeDeterministicId('day', idx, `${explicitDate ?? 'undated'}-${title}`),
+      id: makeDeterministicId('day', idx, `${explicitDate}-${title}`),
       title,
       date: explicitDate,
-      dateProvenance: explicitDate
-        ? sanitizeProvenance(obj.dateProvenance, 'explicit')
-        : 'suggested',
+      dateProvenance: sanitizeProvenance(obj.dateProvenance, 'explicit'),
       startTime,
       endTime,
-      timeProvenance: sanitizeTime24(obj.startTime)
-        ? sanitizeProvenance(obj.timeProvenance, 'explicit')
-        : 'suggested',
+      timeProvenance: sanitizeProvenance(obj.timeProvenance, 'explicit'),
       category: sanitizeCategory(obj.category),
       priority: sanitizePriority(obj.priority),
       sourcePage,

@@ -1,7 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { SmartPdfImportPreview } from '../components/capture/SmartPdfImportPreview';
+import { StrictSchedulePreview } from '../components/capture/StrictSchedulePreview';
 import { BiIcon } from '../components/ui/BiIcon';
-import { useDayFlow } from '../context/DayFlowContext';
+import { type ConfirmSchedulePdfResult, useDayFlow } from '../context/DayFlowContext';
+import { useAuth } from '../hooks/useAuth';
+import {
+  createLibraryResourceApi,
+  uploadLibraryCoverPngApi,
+  uploadLibraryPdfFileApi,
+} from '../services/libraryService';
 import {
   ActivityCategory,
   PdfExtractedQuotation,
@@ -9,7 +15,6 @@ import {
   StudyQuotation,
 } from '../types/dayflow';
 import type {
-  PdfAutoSyncCommitResult,
   PdfPageImagePayload,
   StructuredPdfPlan,
 } from '../types/pdfSchedule';
@@ -18,6 +23,7 @@ import {
   minutesToTime24,
   parseTimeToMinutes,
 } from '../utils/dateTime';
+import { analyzePdfForLibrary } from '../utils/libraryPdfAnalyzer';
 import {
   ExtractedPdfPage,
   extractPdfPages,
@@ -27,6 +33,12 @@ import {
 } from '../utils/pdfExtractor';
 import { resolveActivitiesForDate } from '../utils/recurrence';
 import { findAvailableSlots } from '../utils/scheduler';
+import {
+  extractAndValidateStrictSchedule,
+  type StrictScheduleSession,
+  type StrictScheduleValidationResult,
+  validateStructuredPlanStrict,
+} from '../utils/strictScheduleValidator';
 
 const CATEGORIES: ActivityCategory[] = [
   'Study',
@@ -67,6 +79,7 @@ function extractPdfFileFromClipboard(clipboardData: DataTransfer | null): {
 }
 
 export const CaptureView: React.FC = () => {
+  const { status: authStatus, session } = useAuth();
   const {
     state,
     pendingPdfPickerOpen,
@@ -75,42 +88,52 @@ export const CaptureView: React.FC = () => {
     deleteNote,
     saveQuotation,
     deleteQuotation,
-    importStructuredPdfPlan,
-    syncStructuredPdfPlan,
-    updateSettings,
+    confirmSchedulePdfSessions,
     setActivePage,
     openQuickActivitySheet,
     pushToast,
   } = useDayFlow();
 
+  const authCreds = useMemo(
+    () => ({
+      accessToken: session?.access_token ?? null,
+      isGuest: authStatus === 'guest',
+    }),
+    [session?.access_token, authStatus]
+  );
+
   const todayISO = getTodayISO();
   const timeFormat = state.settings.timeFormat;
-  const autoSyncEnabled = state.settings.autoSyncPdfSchedule;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cachedPlansRef = useRef<Map<string, StructuredPdfPlan>>(new Map());
-  const autoSyncRef = useRef(autoSyncEnabled);
-  autoSyncRef.current = autoSyncEnabled;
 
   const [activeTab, setActiveTab] = useState<CaptureTab>('pdf');
   const [isDraggingPdf, setIsDraggingPdf] = useState(false);
 
-  // PDF extraction & structured plan state
+  // Strict PDF extraction, validation & confirmation state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [pdfExtracting, setPdfExtracting] = useState(false);
   const [pdfExtraction, setPdfExtraction] = useState<PdfTextExtractionResult | null>(null);
   const [pdfError, setPdfError] = useState('');
-  const [structuredPlan, setStructuredPlan] = useState<StructuredPdfPlan | null>(null);
+  const [strictValidation, setStrictValidation] =
+    useState<StrictScheduleValidationResult | null>(null);
+  const [candidateSessions, setCandidateSessions] = useState<StrictScheduleSession[]>([]);
+  const [analysisLabel, setAnalysisLabel] = useState('Local strict schedule validation');
   const [extractedQuotes, setExtractedQuotes] = useState<PdfExtractedQuotation[]>([]);
   const [includeMultimodalSnapshots, setIncludeMultimodalSnapshots] = useState(false);
 
-  // Optional Gemini server-side enhancement state
+  // Optional Gemini server-side scan state (still strictly validated before preview)
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
   const [aiError, setAiError] = useState('');
 
-  // Auto-Sync commit state
-  const [autoSyncing, setAutoSyncing] = useState(false);
-  const [autoSyncResult, setAutoSyncResult] = useState<PdfAutoSyncCommitResult | null>(null);
-  const [lastCandidatePlan, setLastCandidatePlan] = useState<StructuredPdfPlan | null>(null);
+  // Explicit confirmation import state
+  const [confirmingImport, setConfirmingImport] = useState(false);
+  const [confirmResult, setConfirmResult] = useState<ConfirmSchedulePdfResult | null>(null);
+
+  // Rejection -> Save to EKAGRA Library bridge state
+  const [savingToLibrary, setSavingToLibrary] = useState(false);
+  const [savedToLibraryId, setSavedToLibraryId] = useState<string | null>(null);
+  const [librarySaveError, setLibrarySaveError] = useState('');
 
   // Quick notes & quotations library state
   const [searchQuery, setSearchQuery] = useState('');
@@ -201,82 +224,6 @@ export const CaptureView: React.FC = () => {
     [includeMultimodalSnapshots, todayISO]
   );
 
-  const runAutoSync = useCallback(
-    async (planToSync: StructuredPdfPlan) => {
-      setAutoSyncing(true);
-      setAutoSyncResult(null);
-      setLastCandidatePlan(planToSync);
-
-      try {
-        const { commit, reviewPlan } = await syncStructuredPdfPlan(planToSync);
-        setAutoSyncResult(commit);
-
-        if (commit.reviewItems.length > 0) {
-          setStructuredPlan(reviewPlan);
-        } else {
-          setStructuredPlan(planToSync);
-        }
-
-        if (
-          commit.status === 'synced' &&
-          commit.persisted &&
-          commit.activitiesAdded + commit.tasksAdded + commit.notesAdded > 0
-        ) {
-          pushToast({
-            type: commit.reviewItems.length > 0 ? 'warning' : 'success',
-            title: 'Schedule synced successfully',
-            description: `${commit.activitiesAdded} activities added · ${commit.duplicatesSkipped} duplicates skipped${
-              commit.reviewItems.length > 0
-                ? ` · ${commit.reviewItems.length} needing review`
-                : ''
-            }`,
-          });
-        } else if (commit.status === 'duplicates_only') {
-          pushToast({
-            type: 'info',
-            title: 'Already synced',
-            description: `${commit.duplicatesSkipped} duplicate entries skipped.`,
-          });
-        } else if (commit.status === 'needs_review') {
-          pushToast({
-            type: 'warning',
-            title: 'Review required before syncing',
-            description: `${commit.reviewItems.length} entries need confirmation.`,
-          });
-        } else if (commit.status === 'error') {
-          pushToast({
-            type: 'error',
-            title: 'Sync failed',
-            description: commit.error || 'Could not save synced schedule entries.',
-          });
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'PDF auto-sync failed.';
-        setAutoSyncResult({
-          status: 'error',
-          persisted: false,
-          error: msg,
-          activitiesAdded: 0,
-          recurringRulesAdded: 0,
-          tasksAdded: 0,
-          notesAdded: 0,
-          duplicatesSkipped: 0,
-          conflictsCount: 0,
-          reviewItems: [],
-          timetableDiff: {
-            hasPreviousImportFromFile: false,
-            addedTitles: [],
-            changedTitles: [],
-            removedTitles: [],
-          },
-        });
-      } finally {
-        setAutoSyncing(false);
-      }
-    },
-    [syncStructuredPdfPlan, pushToast]
-  );
-
   const handleFilePicked = useCallback(
     async (file: File | null) => {
       if (!file) return;
@@ -288,91 +235,44 @@ export const CaptureView: React.FC = () => {
       setSelectedFile(file);
       setPdfError('');
       setAiError('');
-      setAutoSyncResult(null);
-      setLastCandidatePlan(null);
       setPdfExtracting(true);
       setPdfExtraction(null);
-      setStructuredPlan(null);
+      setStrictValidation(null);
+      setCandidateSessions([]);
+      setConfirmResult(null);
+      setSavedToLibraryId(null);
+      setLibrarySaveError('');
       setExtractedQuotes([]);
+      setAnalysisLabel('Local strict schedule validation');
 
       try {
         const result = await extractPdfPages(file);
         setPdfExtraction(result);
         setIncludeMultimodalSnapshots(result.isScannedOrEmpty || result.hasComplexTables);
 
-        const shouldAutoSync = autoSyncRef.current;
+        const strict = extractAndValidateStrictSchedule(result);
+        setStrictValidation(strict);
 
-        if (result.isScannedOrEmpty) {
-          if (shouldAutoSync) {
-            setPdfExtracting(false);
-            setAiAnalyzing(true);
-            try {
-              const aiPlan = await requestGeminiPlan(result, file, true);
-              setStructuredPlan(aiPlan);
-              setExtractedQuotes(aiPlan.quotations ?? []);
-              await runAutoSync(aiPlan);
-            } catch (err) {
-              setAiError(
-                err instanceof Error
-                  ? err.message
-                  : 'Scanned PDF could not be analyzed automatically.'
-              );
-            } finally {
-              setAiAnalyzing(false);
-            }
-          }
-          return;
-        }
-
-        let activePlan = parsePdfPagesToStructuredPlan(result.fileName, result.pages, {
-          documentHash: result.documentHash,
-          referenceDateISO: todayISO,
-        });
-
-        setStructuredPlan(activePlan);
-        setExtractedQuotes(activePlan.quotations);
-
-        const localScheduleCount =
-          activePlan.weeklyPlans.length +
-          activePlan.dailyPlans.length +
-          activePlan.monthlyGoals.length +
-          activePlan.deadlines.length;
-
-        const totalFound = localScheduleCount + activePlan.quotations.length;
-
-        if (shouldAutoSync) {
-          if (result.hasComplexTables || localScheduleCount === 0) {
-            setAiAnalyzing(true);
-            try {
-              const aiPlan = await requestGeminiPlan(result, file, result.hasComplexTables);
-              activePlan = aiPlan;
-              setStructuredPlan(aiPlan);
-              setExtractedQuotes(aiPlan.quotations ?? []);
-            } catch (err) {
-              // Keep local plan if it has items; report AI fallback error only when 0 items
-              if (localScheduleCount === 0) {
-                setAiError(
-                  err instanceof Error
-                    ? err.message
-                    : 'Unable to reach Gemini analysis endpoint.'
-                );
-              }
-            } finally {
-              setAiAnalyzing(false);
-            }
-          }
-
-          setPdfExtracting(false);
-          await runAutoSync(activePlan);
-          return;
-        }
-
-        if (totalFound === 0) {
+        if (strict.accepted) {
+          setCandidateSessions(strict.sessions);
+          const localParsed = parsePdfPagesToStructuredPlan(result.fileName, result.pages, {
+            documentHash: result.documentHash,
+            referenceDateISO: todayISO,
+          });
+          setExtractedQuotes(localParsed.quotations ?? []);
           pushToast({
             type: 'info',
-            title: 'Text extracted from PDF',
-            description:
-              'No obvious timetable rows matched locally. Click "Enhance with Gemini AI" for table-preserving interpretation.',
+            title: 'Schedule ready for review',
+            description: `${strict.sessions.length} dated & timed study ${
+              strict.sessions.length === 1 ? 'session' : 'sessions'
+            } found. Confirm below to add to your calendar.`,
+          });
+        } else {
+          setCandidateSessions([]);
+          pushToast({
+            type: 'warning',
+            title: 'Not a valid study schedule',
+            description: strict.reasonDetail,
           });
         }
       } catch (err) {
@@ -386,7 +286,7 @@ export const CaptureView: React.FC = () => {
         if (fileInputRef.current) fileInputRef.current.value = '';
       }
     },
-    [todayISO, requestGeminiPlan, runAutoSync, pushToast]
+    [todayISO, pushToast]
   );
 
   // Support clipboard paste of .pdf files when PDF tab is active; reject pasted plain text as non-PDF
@@ -443,34 +343,139 @@ export const CaptureView: React.FC = () => {
     if (!pdfExtraction) return;
     setAiAnalyzing(true);
     setAiError('');
+    setConfirmResult(null);
 
     try {
       const data = await requestGeminiPlan(pdfExtraction, selectedFile, forceMultimodal);
-      setStructuredPlan(data);
-      setExtractedQuotes(data.quotations ?? []);
+      const strictAi = validateStructuredPlanStrict(data, pdfExtraction);
+      setStrictValidation(strictAi);
+      setAnalysisLabel(
+        data.analysisSource === 'gemini-multimodal' ? 'Gemini Multimodal' : 'Gemini AI'
+      );
 
-      if (autoSyncEnabled) {
-        await runAutoSync(data);
-        return;
+      if (strictAi.accepted) {
+        setCandidateSessions(strictAi.sessions);
+        setExtractedQuotes(data.quotations ?? []);
+        pushToast({
+          type: 'info',
+          title: 'Schedule ready for confirmation',
+          description: `Verified ${strictAi.sessions.length} dated & timed study ${
+            strictAi.sessions.length === 1 ? 'session' : 'sessions'
+          }.`,
+        });
+      } else {
+        setCandidateSessions([]);
+        pushToast({
+          type: 'warning',
+          title: 'PDF rejected as a schedule',
+          description: strictAi.reasonDetail,
+        });
       }
-
-      const totalItems =
-        (data.weeklyPlans?.length ?? 0) +
-        (data.dailyPlans?.length ?? 0) +
-        (data.monthlyGoals?.length ?? 0) +
-        (data.deadlines?.length ?? 0);
-
-      pushToast({
-        type: 'success',
-        title: data.cached ? 'Loaded cached Gemini schedule' : 'Structured with Gemini AI',
-        description: `Detected ${totalItems} schedule items (${data.documentType}) and ${
-          data.quotations?.length ?? 0
-        } notes/quotes.`,
-      });
     } catch (err) {
       setAiError(err instanceof Error ? err.message : 'Unable to reach Gemini analysis endpoint.');
     } finally {
       setAiAnalyzing(false);
+    }
+  };
+
+  const handleConfirmScheduleImport = async () => {
+    if (!strictValidation?.accepted || candidateSessions.length === 0) return;
+    setConfirmingImport(true);
+    try {
+      const sourceName = selectedFile?.name || pdfExtraction?.fileName || 'Schedule.pdf';
+      const result = await confirmSchedulePdfSessions(sourceName, candidateSessions);
+      setConfirmResult(result);
+
+      if (result.ok && result.persisted) {
+        pushToast({
+          type: result.activitiesAdded > 0 ? 'success' : 'info',
+          title:
+            result.activitiesAdded > 0
+              ? 'Schedule added to Calendar'
+              : 'No new sessions added',
+          description:
+            result.activitiesAdded > 0
+              ? `${result.activitiesAdded} ${
+                  result.activitiesAdded === 1 ? 'session' : 'sessions'
+                } saved${
+                  result.duplicatesSkipped > 0
+                    ? ` · ${result.duplicatesSkipped} duplicate${
+                        result.duplicatesSkipped === 1 ? '' : 's'
+                      } skipped`
+                    : ''
+                }.`
+              : `${result.duplicatesSkipped} duplicate${
+                  result.duplicatesSkipped === 1 ? '' : 's'
+                } skipped.`,
+        });
+      } else {
+        pushToast({
+          type: 'error',
+          title: 'Import failed',
+          description: result.error || 'Could not save imported schedule.',
+        });
+      }
+    } finally {
+      setConfirmingImport(false);
+    }
+  };
+
+  const handleSaveRejectedPdfToLibrary = async () => {
+    if (!selectedFile || savingToLibrary || savedToLibraryId) return;
+    setSavingToLibrary(true);
+    setLibrarySaveError('');
+
+    try {
+      const buffer = await selectedFile.arrayBuffer();
+      const analyzed = await analyzePdfForLibrary(buffer, selectedFile.name);
+      const created = await createLibraryResourceApi(authCreds, {
+        title: analyzed.title,
+        subtitle: analyzed.subtitle,
+        subject: analyzed.subject || 'General Studies',
+        description: analyzed.description,
+        resourceType: 'pdf',
+        originalFileName: selectedFile.name,
+        originalFileSize: selectedFile.size,
+        coverTemplate: analyzed.coverTemplate,
+        totalPages: analyzed.totalPages,
+        topics: analyzed.topics,
+        lastReadPage: 1,
+        analysisStatus: analyzed.analysisStatus,
+        analysisNote: analyzed.analysisNote,
+      });
+
+      const withPdf = await uploadLibraryPdfFileApi(
+        authCreds,
+        created.id,
+        selectedFile,
+        selectedFile.name
+      );
+
+      await uploadLibraryCoverPngApi(authCreds, created.id, {
+        title: analyzed.title,
+        subtitle: analyzed.subtitle,
+        subject: analyzed.subject || 'General Studies',
+        templateId: analyzed.coverTemplate,
+        totalPages: analyzed.totalPages,
+      }).catch(() => withPdf);
+
+      setSavedToLibraryId(created.id);
+      pushToast({
+        type: 'success',
+        title: 'Saved to EKAGRA Library',
+        description: `"${analyzed.title}" is now on your bookshelf.`,
+      });
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Could not save this PDF to your Library.';
+      setLibrarySaveError(msg);
+      pushToast({
+        type: 'error',
+        title: 'Could not save to Library',
+        description: msg,
+      });
+    } finally {
+      setSavingToLibrary(false);
     }
   };
 
@@ -674,39 +679,22 @@ export const CaptureView: React.FC = () => {
       {/* SECTION A: PDF TO SCHEDULE */}
       {activeTab === 'pdf' && (
         <div className="space-y-6">
-          {/* Auto-Sync Preference Strip */}
+          {/* Strict Validation Rules Notice */}
           <div className="flex flex-col justify-between gap-3 rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface)] px-4 py-3 sm:flex-row sm:items-center">
-            <label
-              htmlFor="capture-auto-sync-toggle"
-              className="flex cursor-pointer items-center gap-2.5 text-xs"
-            >
-              <input
-                id="capture-auto-sync-toggle"
-                type="checkbox"
-                checked={autoSyncEnabled}
-                onChange={(e) => updateSettings({ autoSyncPdfSchedule: e.target.checked })}
-                className="h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+            <div className="flex items-start gap-2.5 text-xs">
+              <BiIcon
+                name="shield-check"
+                className="mt-0.5 text-sm shrink-0 text-[var(--df-accent-soft-fg)]"
               />
               <span>
                 <span className="font-semibold text-[var(--df-text)]">
-                  Automatically sync imported PDF schedules
+                  Strict Schedule Validation
                 </span>
                 <span className="block text-[11px] text-[var(--df-text-muted)]">
-                  Auto-syncs validated activities &amp; deadlines on upload or paste; sends conflicts or undated rows to review.
+                  Only study schedules or roadmaps with explicit calendar dates, study times, and topics can be previewed and confirmed for Calendar import. Save notes or textbooks to EKAGRA Library instead.
                 </span>
               </span>
-            </label>
-
-            {structuredPlan && !autoSyncing && (
-              <button
-                type="button"
-                onClick={() => void runAutoSync(structuredPlan)}
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-3 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)] whitespace-nowrap"
-              >
-                <BiIcon name="arrow-repeat" className="text-xs" />
-                Sync to calendar
-              </button>
-            )}
+            </div>
           </div>
 
           {/* Upload Dropzone + Clipboard PDF Paste */}
@@ -741,25 +729,25 @@ export const CaptureView: React.FC = () => {
                 <BiIcon name="file-earmark-text" className="text-xl" />
               </div>
               <h2 className="mt-3 font-display text-lg font-bold text-[var(--df-text)]">
-                Upload or paste a timetable PDF
+                Upload or paste a study schedule PDF
               </h2>
               <p className="mt-1 text-xs leading-relaxed text-[var(--df-text-muted)]">
-                Drop, choose, or paste a <span className="font-mono">.pdf</span> file from your clipboard. Local extraction runs first on your device.
+                Drop, choose, or paste a <span className="font-mono">.pdf</span> containing dates, study times, and topics. Nothing is added to your calendar until you review and confirm.
               </p>
 
               <button
                 type="button"
-                disabled={pdfExtracting || autoSyncing}
+                disabled={pdfExtracting || confirmingImport}
                 onClick={() => fileInputRef.current?.click()}
                 className="mt-4 inline-flex min-h-[44px] items-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 text-sm font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 active:scale-[0.98] disabled:opacity-60"
               >
                 <BiIcon name="file-earmark-arrow-up" className="text-base" />
                 {pdfExtracting
-                  ? 'Reading PDF...'
+                  ? 'Reading & Validating PDF...'
                   : aiAnalyzing
                   ? 'Analyzing schedule...'
-                  : autoSyncing
-                  ? 'Syncing schedule...'
+                  : confirmingImport
+                  ? 'Saving to Calendar...'
                   : 'Choose PDF file'}
               </button>
 
@@ -771,283 +759,143 @@ export const CaptureView: React.FC = () => {
             </div>
           </section>
 
-          {/* Auto-Sync Progress & Honest Persistence Status */}
-          {autoSyncing && (
-            <section
-              role="status"
-              aria-live="polite"
-              className="flex items-center gap-3 rounded-2xl border border-[var(--df-accent-border)] bg-[var(--df-accent-soft)] px-4 py-3 text-xs font-medium text-[var(--df-accent-soft-fg)]"
-            >
-              <BiIcon name="arrow-repeat" spin className="text-sm" />
-              <span>Validating dates, detecting overlaps &amp; saving schedule to your calendar...</span>
-            </section>
-          )}
-
-          {autoSyncResult && !autoSyncing && (
-            <section
-              role={autoSyncResult.status === 'error' ? 'alert' : 'status'}
-              className={`space-y-3 rounded-3xl border p-5 ${
-                autoSyncResult.status === 'error'
-                  ? 'border-rose-300 bg-rose-50/70 dark:border-rose-900/50 dark:bg-rose-950/25'
-                  : autoSyncResult.status === 'synced'
-                  ? 'border-[var(--df-accent-border)] bg-[var(--df-accent-soft)]/50'
-                  : 'border-amber-300 bg-amber-50/60 dark:border-amber-900/50 dark:bg-amber-950/25'
-              }`}
-            >
-              <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                <div className="flex items-start gap-2.5">
-                  <BiIcon
-                    name={
-                      autoSyncResult.status === 'synced'
-                        ? 'check-circle-fill'
-                        : autoSyncResult.status === 'error'
-                        ? 'exclamation-circle-fill'
-                        : 'exclamation-triangle-fill'
-                    }
-                    className={`mt-0.5 text-base shrink-0 ${
-                      autoSyncResult.status === 'synced'
-                        ? 'text-[var(--df-accent-soft-fg)]'
-                        : autoSyncResult.status === 'error'
-                        ? 'text-rose-600 dark:text-rose-400'
-                        : 'text-amber-600 dark:text-amber-400'
-                    }`}
-                  />
-                  <div>
-                    <h3 className="text-sm font-bold text-[var(--df-text)]">
-                      {autoSyncResult.status === 'synced' && autoSyncResult.persisted
-                        ? 'Schedule synced successfully'
-                        : autoSyncResult.status === 'duplicates_only'
-                        ? 'Already synced — duplicates skipped'
-                        : autoSyncResult.status === 'needs_review'
-                        ? 'Entries require your review before adding'
-                        : autoSyncResult.status === 'empty'
-                        ? 'No schedule activities found in this PDF'
-                        : 'Could not sync PDF schedule'}
-                    </h3>
-                    {autoSyncResult.status === 'error' && autoSyncResult.error && (
-                      <p className="mt-0.5 text-xs text-rose-700 dark:text-rose-300">
-                        {autoSyncResult.error}
-                      </p>
-                    )}
-                    {autoSyncResult.status !== 'error' && (
-                      <p className="mt-1 text-xs text-[var(--df-text-muted)]">
-                        <span className="font-mono font-semibold text-[var(--df-text)]">
-                          {autoSyncResult.activitiesAdded}
-                        </span>{' '}
-                        activities added ·{' '}
-                        {autoSyncResult.tasksAdded > 0 && (
-                          <>
-                            <span className="font-mono font-semibold text-[var(--df-text)]">
-                              {autoSyncResult.tasksAdded}
-                            </span>{' '}
-                            deadlines added ·{' '}
-                          </>
-                        )}
-                        {autoSyncResult.notesAdded > 0 && (
-                          <>
-                            <span className="font-mono font-semibold text-[var(--df-text)]">
-                              {autoSyncResult.notesAdded}
-                            </span>{' '}
-                            roadmaps saved ·{' '}
-                          </>
-                        )}
-                        <span className="font-mono font-semibold text-[var(--df-text)]">
-                          {autoSyncResult.duplicatesSkipped}
-                        </span>{' '}
-                        duplicates skipped ·{' '}
-                        <span className="font-mono font-semibold text-[var(--df-text)]">
-                          {autoSyncResult.reviewItems.length}
-                        </span>{' '}
-                        entries requiring review
-                      </p>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  {autoSyncResult.status === 'error' && lastCandidatePlan && (
-                    <button
-                      type="button"
-                      onClick={() => void runAutoSync(lastCandidatePlan)}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-[var(--df-cta)] px-3.5 text-xs font-semibold text-[var(--df-cta-fg)]"
-                    >
-                      <BiIcon name="arrow-clockwise" className="text-xs" />
-                      Retry Sync
-                    </button>
-                  )}
-                  {(autoSyncResult.status === 'synced' ||
-                    autoSyncResult.status === 'duplicates_only') && (
-                    <button
-                      type="button"
-                      onClick={() => setActivePage('calendar')}
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-3.5 text-xs font-semibold text-[var(--df-accent-fg)]"
-                    >
-                      <BiIcon name="calendar3" className="text-xs" />
-                      View Calendar
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {autoSyncResult.reviewItems.length > 0 && (
-                <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface)] p-3.5">
-                  <p className="text-xs font-semibold text-[var(--df-text)]">
-                    Entries requiring review (kept out of your calendar until confirmed below):
-                  </p>
-                  <ul className="mt-2 space-y-1.5 text-xs text-[var(--df-text-muted)]">
-                    {autoSyncResult.reviewItems.slice(0, 6).map((item) => (
-                      <li key={item.id} className="flex items-start gap-2">
-                        <BiIcon name="dot" className="mt-0.5 text-sm text-amber-500" />
-                        <span>
-                          <span className="font-semibold text-[var(--df-text)]">{item.title}</span> —{' '}
-                          {item.reason}
-                        </span>
-                      </li>
-                    ))}
-                    {autoSyncResult.reviewItems.length > 6 && (
-                      <li className="pl-5 text-[11px] text-[var(--df-text-subtle)]">
-                        +{autoSyncResult.reviewItems.length - 6} more checked in Smart Schedule Review below.
-                      </li>
-                    )}
-                  </ul>
-                </div>
-              )}
-
-              {autoSyncResult.timetableDiff.hasPreviousImportFromFile &&
-                (autoSyncResult.timetableDiff.changedTitles.length > 0 ||
-                  autoSyncResult.timetableDiff.removedTitles.length > 0) && (
-                  <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface)] p-3.5 text-xs text-[var(--df-text-muted)]">
-                    <p className="font-semibold text-[var(--df-text)]">
-                      Updated timetable comparison (existing calendar blocks preserved):
-                    </p>
-                    {autoSyncResult.timetableDiff.changedTitles.length > 0 && (
-                      <p className="mt-1">
-                        Changed times routed for review:{' '}
-                        {autoSyncResult.timetableDiff.changedTitles.join('; ')}
-                      </p>
-                    )}
-                    {autoSyncResult.timetableDiff.removedTitles.length > 0 && (
-                      <p className="mt-1">
-                        Not in updated PDF (kept in calendar):{' '}
-                        {autoSyncResult.timetableDiff.removedTitles.join(', ')}
-                      </p>
-                    )}
-                  </div>
-                )}
-            </section>
-          )}
-
-          {/* Scanned PDF Honest OCR Warning + Multimodal Consent Option */}
-          {pdfExtraction && pdfExtraction.isScannedOrEmpty && !structuredPlan && (
+          {/* REJECTED PDF CARD + SAVE TO EKAGRA LIBRARY BRIDGE */}
+          {pdfExtraction && strictValidation && !strictValidation.accepted && (
             <section
               role="alert"
-              className="rounded-3xl border border-amber-300 bg-amber-50 p-5 dark:border-amber-800/60 dark:bg-amber-950/30"
+              className="space-y-4 rounded-3xl border border-rose-300 bg-rose-50/70 p-5 sm:p-6 dark:border-rose-900/50 dark:bg-rose-950/25"
             >
-              <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-                <div className="flex items-start gap-3">
-                  <BiIcon
-                    name="exclamation-triangle"
-                    className="mt-0.5 text-lg shrink-0 text-amber-600 dark:text-amber-400"
-                  />
-                  <div className="space-y-1">
-                    <h3 className="text-sm font-semibold text-[var(--df-text)]">
-                      Scanned or image-based PDF: {pdfExtraction.fileName}
-                    </h3>
-                    <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
-                      {pdfExtraction.scannedReason}
-                    </p>
-                  </div>
+              <div className="flex items-start gap-3">
+                <BiIcon
+                  name="exclamation-circle-fill"
+                  className="mt-0.5 text-lg shrink-0 text-rose-600 dark:text-rose-400"
+                />
+                <div className="space-y-1.5">
+                  <p className="text-xs font-semibold text-[var(--df-text-muted)]">
+                    {pdfExtraction.fileName}
+                  </p>
+                  <h3 className="text-sm font-bold leading-relaxed text-[var(--df-text)]">
+                    {strictValidation.errorMessage}
+                  </h3>
+                  <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
+                    Reason: {strictValidation.reasonDetail}
+                  </p>
                 </div>
-
-                <button
-                  type="button"
-                  disabled={aiAnalyzing}
-                  onClick={() => void handleAnalyzeWithGemini(true)}
-                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-cta)] px-4 text-xs font-semibold text-[var(--df-cta-fg)] hover:opacity-90 disabled:opacity-60 whitespace-nowrap shrink-0"
-                >
-                  <BiIcon name="stars" className="text-xs" />
-                  {aiAnalyzing ? 'Reading pages...' : 'Read with Gemini Multimodal'}
-                </button>
               </div>
+
+              <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                {selectedFile && !savedToLibraryId && (
+                  <button
+                    type="button"
+                    disabled={savingToLibrary}
+                    onClick={() => void handleSaveRejectedPdfToLibrary()}
+                    className="inline-flex min-h-[42px] items-center gap-2 rounded-2xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 active:scale-[0.98] disabled:opacity-60"
+                  >
+                    <BiIcon
+                      name={savingToLibrary ? 'arrow-repeat' : 'book'}
+                      spin={savingToLibrary}
+                      className="text-sm"
+                    />
+                    {savingToLibrary ? 'Saving to Library...' : 'Save to Library'}
+                  </button>
+                )}
+
+                {savedToLibraryId && (
+                  <button
+                    type="button"
+                    onClick={() => setActivePage('library')}
+                    className="inline-flex min-h-[42px] items-center gap-2 rounded-2xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)]"
+                  >
+                    <BiIcon name="journals" className="text-sm" />
+                    Open in Library
+                  </button>
+                )}
+
+                {strictValidation.classification === 'rejected_scanned_unreadable' && (
+                  <button
+                    type="button"
+                    disabled={aiAnalyzing}
+                    onClick={() => void handleAnalyzeWithGemini(true)}
+                    className="inline-flex min-h-[42px] items-center gap-1.5 rounded-2xl border border-[var(--df-border-strong)] bg-[var(--df-surface)] px-4 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-accent)] disabled:opacity-60"
+                  >
+                    <BiIcon name="stars" className="text-xs" />
+                    {aiAnalyzing ? 'Scanning pages...' : 'Try Gemini Multimodal Scan'}
+                  </button>
+                )}
+              </div>
+
+              {savedToLibraryId && (
+                <p className="text-xs font-semibold text-[var(--df-accent-soft-fg)]">
+                  Saved to your EKAGRA Library bookshelf without modifying your calendar.
+                </p>
+              )}
+              {librarySaveError && (
+                <p className="text-xs font-medium text-rose-600 dark:text-rose-400">
+                  {librarySaveError}
+                </p>
+              )}
               {aiError && (
-                <p role="alert" className="mt-3 text-xs font-medium text-rose-600 dark:text-rose-400">
+                <p className="text-xs font-medium text-rose-600 dark:text-rose-400">
                   {aiError}
                 </p>
               )}
             </section>
           )}
 
-          {/* Review Screen for Extracted PDF Content */}
-          {pdfExtraction && (!pdfExtraction.isScannedOrEmpty || structuredPlan !== null) && (
+          {/* ACCEPTED VALID SCHEDULE PREVIEW + CONFIRMATION */}
+          {pdfExtraction && strictValidation && strictValidation.accepted && (
             <div className="space-y-6">
-              {/* Document Metadata + Optional Explicit-Consent Gemini Analysis */}
+              <StrictSchedulePreview
+                fileName={pdfExtraction.fileName}
+                pageCount={pdfExtraction.pageCount}
+                analysisLabel={analysisLabel}
+                validation={strictValidation}
+                sessions={candidateSessions}
+                onChangeSessions={setCandidateSessions}
+                existingActivities={state.activities}
+                importedFingerprints={state.importedFingerprints}
+                timeFormat={timeFormat}
+                confirming={confirmingImport}
+                confirmResult={confirmResult}
+                onConfirmImport={() => void handleConfirmScheduleImport()}
+                onOpenCalendar={() => setActivePage('calendar')}
+              />
+
+              {/* Optional Gemini Verification for Multi-Column Timetable PDFs */}
               <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">
-                <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold text-[var(--df-text)]">
-                      {pdfExtraction.fileName}
-                    </p>
-                    <p className="text-xs text-[var(--df-text-muted)]">
-                      {pdfExtraction.pageCount} {pdfExtraction.pageCount === 1 ? 'page' : 'pages'} ·{' '}
-                      {structuredPlan?.analysisSource === 'gemini-multimodal'
-                        ? 'Gemini Multimodal'
-                        : structuredPlan?.analysisSource === 'gemini'
-                        ? 'Gemini AI'
-                        : 'Local table-preserving extraction'}{' '}
-                      · {structuredPlan?.weeklyPlans.length ?? 0} weekly slots ·{' '}
-                      {structuredPlan?.monthlyGoals.length ?? 0} monthly roadmaps ·{' '}
-                      {structuredPlan?.deadlines.length ?? 0} deadlines
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={aiAnalyzing || autoSyncing}
-                    onClick={() => void handleAnalyzeWithGemini(false)}
-                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-xs font-semibold text-[var(--df-text)] transition-colors hover:border-[var(--df-border-strong)] disabled:opacity-60 whitespace-nowrap shrink-0"
-                  >
-                    <BiIcon name="stars" className="text-xs" />
-                    {aiAnalyzing ? 'Analyzing...' : 'Enhance with Gemini AI'}
-                  </button>
-                </div>
-
-                <div className="mt-3 flex flex-col justify-between gap-2.5 rounded-2xl bg-[var(--df-bg)] px-3.5 py-2.5 sm:flex-row sm:items-center">
-                  <p className="text-[11px] leading-relaxed text-[var(--df-text-muted)]">
-                    Privacy notice: Local extraction runs on-device first. Gemini AI is invoked only when you click{' '}
-                    <span className="font-semibold text-[var(--df-text)]">Enhance with Gemini AI</span>{' '}
-                    or when auto-sync encounters complex/scanned PDF tables.
+                <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                  <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
+                    Need to double-check a complex multi-column table? Run optional{' '}
+                    <span className="font-semibold text-[var(--df-text)]">Gemini AI</span>{' '}
+                    verification. All entries still require strict date &amp; time validation and your confirmation.
                   </p>
-                  <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-[var(--df-text)] shrink-0">
-                    <input
-                      type="checkbox"
-                      checked={includeMultimodalSnapshots}
-                      onChange={(e) => setIncludeMultimodalSnapshots(e.target.checked)}
-                      className="h-3.5 w-3.5 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
-                    />
-                    <span>Multimodal table snapshots</span>
-                  </label>
+                  <div className="flex flex-wrap items-center gap-3 shrink-0">
+                    <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-[var(--df-text)]">
+                      <input
+                        type="checkbox"
+                        checked={includeMultimodalSnapshots}
+                        onChange={(e) => setIncludeMultimodalSnapshots(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+                      />
+                      <span>Multimodal snapshots</span>
+                    </label>
+                    <button
+                      type="button"
+                      disabled={aiAnalyzing || confirmingImport}
+                      onClick={() => void handleAnalyzeWithGemini(false)}
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-3.5 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)] disabled:opacity-60 whitespace-nowrap"
+                    >
+                      <BiIcon name="stars" className="text-xs" />
+                      {aiAnalyzing ? 'Analyzing...' : 'Verify with Gemini AI'}
+                    </button>
+                  </div>
                 </div>
-
                 {aiError && (
                   <p role="alert" className="mt-2.5 text-xs font-medium text-rose-600 dark:text-rose-400">
                     {aiError}
                   </p>
                 )}
               </section>
-
-              {/* 1. Smart 4-Tab Schedule Review & Weekly Timetable Grid */}
-              {structuredPlan && (
-                <SmartPdfImportPreview
-                  plan={structuredPlan}
-                  onUpdatePlan={(updater) =>
-                    setStructuredPlan((prev) => (prev ? updater(prev) : prev))
-                  }
-                  existingActivities={state.activities}
-                  timeFormat={timeFormat}
-                  onImport={importStructuredPdfPlan}
-                  onNotify={pushToast}
-                />
-              )}
 
               {/* 2. Separate Quotations & Study Notes Review */}
               <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">

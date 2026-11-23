@@ -56,6 +56,12 @@ import {
 import { evaluatePdfAutoSync } from '../utils/pdfAutoSync';
 import { computeImportFingerprint } from '../utils/pdfExtractor';
 import {
+  sanitizeIsoDate,
+  sanitizeTime24,
+  timeToMinutes,
+} from '../utils/pdfSchemaValidator';
+import type { StrictScheduleSession } from '../utils/strictScheduleValidator';
+import {
   detectRecurringScheduleConflicts,
   groupWeeklyPlansIntoScheduleActivities,
   resolveActivitiesForDate,
@@ -145,6 +151,15 @@ export interface StructuredPdfImportResult {
   notesAdded: number;
   skippedDuplicates: number;
   conflictsCount: number;
+}
+
+export interface ConfirmSchedulePdfResult {
+  ok: boolean;
+  persisted: boolean;
+  activitiesAdded: number;
+  duplicatesSkipped: number;
+  conflictsCount: number;
+  error?: string;
 }
 
 export interface QuickActivitySheetPayload {
@@ -252,6 +267,10 @@ interface DayFlowContextValue {
     items: PdfSuggestedActivity[]
   ) => { added: number; skippedDuplicates: number; withConflicts: number };
   importStructuredPdfPlan: (payload: StructuredPdfImportPayload) => StructuredPdfImportResult;
+  confirmSchedulePdfSessions: (
+    sourceFile: string,
+    sessions: StrictScheduleSession[]
+  ) => Promise<ConfirmSchedulePdfResult>;
   syncStructuredPdfPlan: (
     plan: StructuredPdfPlan
   ) => Promise<{ commit: PdfAutoSyncCommitResult; reviewPlan: StructuredPdfPlan }>;
@@ -1773,11 +1792,11 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
 
-      // 2. Specific single-date daily plan items
+      // 2. Specific single-date daily plan items (strictly requires explicit date)
       if (payload.dailyItems && payload.dailyItems.length > 0) {
-        const todayFallback = getTodayISO();
         for (const item of payload.dailyItems) {
-          const targetDate = item.date || todayFallback;
+          const targetDate = sanitizeIsoDate(item.date);
+          if (!targetDate) continue;
           const itemFingerprint = computeImportFingerprint(
             payload.sourceFile,
             item.title,
@@ -2067,6 +2086,147 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [applyStructuredPdfImport, authStatus, user, reminderScopeKey]
   );
 
+  const confirmSchedulePdfSessions = useCallback(
+    async (
+      sourceFile: string,
+      sessions: StrictScheduleSession[]
+    ): Promise<ConfirmSchedulePdfResult> => {
+      const currentState = stateRef.current;
+      const now = new Date().toISOString();
+      const tzName = getLocalTimeZoneName();
+      const nextActivities = [...currentState.activities];
+      const fingerprintSet = new Set(currentState.importedFingerprints);
+      const addedActivityIds: string[] = [];
+
+      let activitiesAdded = 0;
+      let duplicatesSkipped = 0;
+      let conflictsCount = 0;
+
+      for (const session of sessions) {
+        if (!session.included) continue;
+        const cleanTitle = session.title.trim();
+        const validDate = sanitizeIsoDate(session.date);
+        const validStart = sanitizeTime24(session.startTime);
+        const validEnd = sanitizeTime24(session.endTime);
+
+        if (
+          !cleanTitle ||
+          !validDate ||
+          !validStart ||
+          !validEnd ||
+          timeToMinutes(validEnd) <= timeToMinutes(validStart)
+        ) {
+          continue;
+        }
+
+        const fp = computeImportFingerprint(sourceFile, cleanTitle, validDate, validStart);
+        const normalizedTitle = cleanTitle.toLowerCase();
+        const exactMatch = nextActivities.some(
+          (a) =>
+            a.date === validDate &&
+            a.startTime === validStart &&
+            a.endTime === validEnd &&
+            a.title.trim().toLowerCase() === normalizedTitle
+        );
+
+        if (fingerprintSet.has(fp) || exactMatch) {
+          duplicatesSkipped += 1;
+          continue;
+        }
+
+        const existingForDay = resolveActivitiesForDate(currentState.activities, validDate);
+        const candidate: ScheduleActivity = {
+          id: generateId(),
+          title: cleanTitle,
+          description: `Source: ${sourceFile} (p. ${session.sourcePage})${
+            session.notes ? ` · ${session.notes}` : ''
+          } · TZ: ${tzName}`,
+          date: validDate,
+          startTime: validStart,
+          endTime: validEnd,
+          category: session.category,
+          color: CATEGORY_DEFAULT_COLORS[session.category] ?? 'sky',
+          priority: session.priority,
+          status: 'pending',
+          linkedTaskId: null,
+          recurrence: { frequency: 'none', endDate: null },
+          excludedDates: [],
+          occurrenceOverrides: {},
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        const resolvedCandidate = resolveActivitiesForDate([candidate], validDate);
+        if (
+          resolvedCandidate.length > 0 &&
+          detectConflicts([...existingForDay, ...resolvedCandidate]).length > 0
+        ) {
+          conflictsCount += 1;
+        }
+
+        nextActivities.push(candidate);
+        addedActivityIds.push(candidate.id);
+        fingerprintSet.add(fp);
+        activitiesAdded += 1;
+      }
+
+      if (activitiesAdded === 0) {
+        return {
+          ok: true,
+          persisted: true,
+          activitiesAdded: 0,
+          duplicatesSkipped,
+          conflictsCount,
+        };
+      }
+
+      const nextState: DayFlowState = {
+        ...currentState,
+        activities: nextActivities,
+        importedFingerprints: Array.from(fingerprintSet),
+      };
+
+      try {
+        if (authStatus === 'authenticated' && user) {
+          if (!cloudSchemaReadyRef.current) {
+            throw new Error(
+              'Cloud database tables are not ready yet. Check your Supabase connection before importing.'
+            );
+          }
+          await supabaseDayFlowRepository.saveForUser(user.id, nextState);
+        } else {
+          dayFlowRepository.save(nextState);
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          persisted: false,
+          activitiesAdded: 0,
+          duplicatesSkipped,
+          conflictsCount,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Could not save imported study schedule to storage.',
+        };
+      }
+
+      setState(nextState);
+      if (addedActivityIds.length > 0) {
+        clearReminderKeysForActivityIds(reminderScopeKey, addedActivityIds);
+      }
+
+      return {
+        ok: true,
+        persisted: true,
+        activitiesAdded,
+        duplicatesSkipped,
+        conflictsCount,
+      };
+    },
+    [authStatus, user, reminderScopeKey]
+  );
+
   // Settings & Persistence
   const updateSettings = useCallback(
     (patch: Partial<AppSettings>) => {
@@ -2182,6 +2342,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     isFingerprintImported,
     importPdfActivities,
     importStructuredPdfPlan,
+    confirmSchedulePdfSessions,
     syncStructuredPdfPlan,
     pendingPdfPickerOpen,
     consumePendingPdfPickerOpen,
