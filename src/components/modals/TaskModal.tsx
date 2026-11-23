@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ChevronDown, ChevronUp, X } from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 import { TaskFormInput, useDayFlow } from '../../context/DayFlowContext';
 import { ActivityCategory, PriorityLevel, TaskItem } from '../../types/dayflow';
 import { getTodayISO } from '../../utils/dateTime';
@@ -105,7 +105,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ isOpen, editingTask, onClo
             aria-label="Close"
             className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--df-text-muted)] hover:bg-[var(--df-surface-hover)] hover:text-[var(--df-text)]"
           >
-            <X className="h-4 w-4" />
+            <BiIcon name="x-lg" className="text-[14px]" />
           </button>
         </div>
 
@@ -175,7 +175,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ isOpen, editingTask, onClo
               className="flex w-full items-center justify-between text-xs font-medium text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
             >
               <span>{showMore ? 'Hide details' : 'Notes, category & priority'}</span>
-              {showMore ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              <BiIcon name={showMore ? 'chevron-up' : 'chevron-down'} className="text-[14px]" />
             </button>
 
             {showMore && (

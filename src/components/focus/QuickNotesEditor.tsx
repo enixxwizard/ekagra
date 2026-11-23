@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, ChevronDown, ChevronUp, Plus, StickyNote } from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 import { useDayFlow } from '../../context/DayFlowContext';
 import { ActivityCategory, QuickNote } from '../../types/dayflow';
 import { generateId } from '../../utils/dateTime';
@@ -134,7 +134,7 @@ export const QuickNotesEditor: React.FC<QuickNotesEditorProps> = ({
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <StickyNote className="h-4 w-4 text-[var(--df-text-muted)]" />
+          <BiIcon name="sticky" className="text-[15px] text-[var(--df-text-muted)]" />
           <h2 className="text-sm font-semibold text-[var(--df-text)]">
             Quick notes
           </h2>
@@ -149,7 +149,7 @@ export const QuickNotesEditor: React.FC<QuickNotesEditorProps> = ({
             onClick={startFreshNote}
             className="inline-flex items-center gap-1 rounded-lg border border-[var(--df-border)] px-2 py-1 text-[11px] font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)]"
           >
-            <Plus className="h-3 w-3" />
+            <BiIcon name="plus-lg" className="text-[12px]" />
             New
           </button>
         </div>
@@ -224,10 +224,10 @@ export const QuickNotesEditor: React.FC<QuickNotesEditorProps> = ({
             className="flex w-full items-center justify-between text-left text-xs font-medium text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
           >
             <span className="inline-flex items-center gap-1.5">
-              <BookOpen className="h-3.5 w-3.5" />
+              <BiIcon name="book" className="text-[13px]" />
               Saved notes &amp; PDF quotes
             </span>
-            {showRefs ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            <BiIcon name={showRefs ? 'chevron-up' : 'chevron-down'} className="text-[13px]" />
           </button>
 
           {showRefs && (

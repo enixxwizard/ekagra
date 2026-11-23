@@ -1,6 +1,6 @@
 import React from 'react';
-import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { useDayFlow } from '../../context/DayFlowContext';
+import { BiIcon } from './BiIcon';
 
 export const ToastContainer: React.FC = () => {
   const { toasts, dismissToast } = useDayFlow();
@@ -15,13 +15,13 @@ export const ToastContainer: React.FC = () => {
       {toasts.map((toast) => {
         const icon =
           toast.type === 'success' ? (
-            <CheckCircle2 className="h-4 w-4 text-[var(--df-accent-soft-fg)] shrink-0" />
+            <BiIcon name="check-circle" className="text-sm text-[var(--df-accent-soft-fg)] shrink-0" />
           ) : toast.type === 'warning' ? (
-            <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+            <BiIcon name="exclamation-triangle" className="text-sm text-amber-600 shrink-0" />
           ) : toast.type === 'error' ? (
-            <XCircle className="h-4 w-4 text-rose-600 shrink-0" />
+            <BiIcon name="x-circle" className="text-sm text-rose-600 shrink-0" />
           ) : (
-            <Info className="h-4 w-4 text-[var(--df-text)] shrink-0" />
+            <BiIcon name="info-circle" className="text-sm text-[var(--df-text)] shrink-0" />
           );
 
         return (
@@ -47,7 +47,7 @@ export const ToastContainer: React.FC = () => {
               aria-label="Dismiss"
               className="rounded-lg p-1 text-[var(--df-text-subtle)] hover:text-[var(--df-text)]"
             >
-              <X className="h-3.5 w-3.5" />
+              <BiIcon name="x-lg" className="text-xs" />
             </button>
           </div>
         );

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 import { HabitFormInput, useDayFlow } from '../../context/DayFlowContext';
 import { ActivityCategory, ActivityColor, HabitFrequency, HabitItem } from '../../types/dayflow';
 import { ACTIVITY_COLORS } from '../../utils/colors';
@@ -100,7 +100,7 @@ export const HabitModal: React.FC<HabitModalProps> = ({ isOpen, editingHabit, on
             aria-label="Close"
             className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--df-text-muted)] hover:bg-[var(--df-surface-hover)] hover:text-[var(--df-text)]"
           >
-            <X className="h-4 w-4" />
+            <BiIcon name="x-lg" className="text-[14px]" />
           </button>
         </div>
 

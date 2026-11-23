@@ -1,7 +1,6 @@
 import React, { useMemo } from 'react';
 import { format, parseISO } from 'date-fns';
-import { Check, FileUp, Play, Plus, Repeat } from 'lucide-react';
-import { ScheduleEnhancerPanel } from '../components/plan/ScheduleEnhancerPanel';
+import { BiIcon } from '../components/ui/BiIcon';
 import { useDayFlow } from '../context/DayFlowContext';
 import { ResolvedActivity } from '../types/dayflow';
 import { ACTIVITY_COLORS } from '../utils/colors';
@@ -155,14 +154,14 @@ export const PlanView: React.FC = () => {
                   aria-label={`Complete ${currentOrNextActivity.activity.title}`}
                   className="inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] text-[var(--df-text-muted)] transition-colors hover:border-[var(--df-border-strong)] hover:text-[var(--df-text)]"
                 >
-                  <Check className="h-4.5 w-4.5" />
+                  <BiIcon name="check-lg" className="text-base" />
                 </button>
                 <button
                   type="button"
                   onClick={() => handleStartFocus(currentOrNextActivity.activity)}
                   className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 py-3 text-sm font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 active:scale-[0.98] whitespace-nowrap shrink-0"
                 >
-                  <Play className="h-4 w-4 fill-current" />
+                  <BiIcon name="play-fill" className="text-base" />
                   Start Focus
                 </button>
               </div>
@@ -186,7 +185,7 @@ export const PlanView: React.FC = () => {
                 onClick={() => handleStartFocus(null)}
                 className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 py-3 text-sm font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 active:scale-[0.98] whitespace-nowrap shrink-0"
               >
-                <Play className="h-4 w-4 fill-current" />
+                <BiIcon name="play-fill" className="text-base" />
                 Start Focus
               </button>
             </div>
@@ -248,7 +247,7 @@ export const PlanView: React.FC = () => {
                           {act.title}
                         </p>
                         {act.isRecurring && (
-                          <Repeat className="h-3.5 w-3.5 shrink-0 text-[var(--df-text-subtle)]" />
+                          <BiIcon name="repeat" className="text-xs shrink-0 text-[var(--df-text-subtle)]" />
                         )}
                       </div>
                       <p className="mt-0.5 truncate text-xs text-[var(--df-text-muted)]">
@@ -269,7 +268,7 @@ export const PlanView: React.FC = () => {
                           : 'border-[var(--df-border)] bg-[var(--df-bg)] text-transparent hover:border-[var(--df-border-strong)]'
                       }`}
                     >
-                      <Check className="h-4.5 w-4.5 stroke-[2.5]" />
+                      <BiIcon name="check-lg" className="text-base font-bold" />
                     </button>
                   </div>
                 );
@@ -294,7 +293,7 @@ export const PlanView: React.FC = () => {
           }
           className="flex min-h-[52px] items-center justify-center gap-2 rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface)] px-4 text-sm font-semibold text-[var(--df-text)] transition-colors hover:border-[var(--df-border-strong)] hover:bg-[var(--df-surface-hover)] active:scale-[0.99] whitespace-nowrap"
         >
-          <Plus className="h-4 w-4" />
+          <BiIcon name="plus-lg" className="text-sm" />
           Quick Add
         </button>
 
@@ -303,13 +302,10 @@ export const PlanView: React.FC = () => {
           onClick={openCapturePdfImport}
           className="flex min-h-[52px] items-center justify-center gap-2 rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface-muted)] px-4 text-sm font-semibold text-[var(--df-text)] transition-colors hover:border-[var(--df-border-strong)] hover:bg-[var(--df-surface-hover)] active:scale-[0.99] whitespace-nowrap"
         >
-          <FileUp className="h-4 w-4" />
+          <BiIcon name="file-earmark-arrow-up" className="text-sm" />
           Import PDF
         </button>
       </div>
-
-      {/* 5. AI Schedule Enhancer */}
-      <ScheduleEnhancerPanel />
     </div>
   );
 };

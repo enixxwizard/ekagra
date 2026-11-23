@@ -29,6 +29,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   reminderLeadMinutes: 10,
   dailyCapacityHours: 8,
   preferredMusicUrl: null,
+  autoSyncPdfSchedule: false,
+  preferredResourceLanguage: null,
+  ekuMuted: false,
 };
 
 export const DEFAULT_ACTIVE_TIMER: ActiveTimerState = {
@@ -650,6 +653,19 @@ function validateAndSanitizeState(raw: unknown): DayFlowState {
       typeof rawSettings.preferredMusicUrl === 'string' && rawSettings.preferredMusicUrl.trim()
         ? rawSettings.preferredMusicUrl.trim()
         : null,
+    autoSyncPdfSchedule:
+      typeof rawSettings.autoSyncPdfSchedule === 'boolean'
+        ? rawSettings.autoSyncPdfSchedule
+        : DEFAULT_SETTINGS.autoSyncPdfSchedule,
+    preferredResourceLanguage:
+      typeof rawSettings.preferredResourceLanguage === 'string' &&
+      rawSettings.preferredResourceLanguage.trim()
+        ? rawSettings.preferredResourceLanguage.trim().slice(0, 40)
+        : null,
+    ekuMuted:
+      typeof rawSettings.ekuMuted === 'boolean'
+        ? rawSettings.ekuMuted
+        : DEFAULT_SETTINGS.ekuMuted,
   };
 
   const rawTimer = isObject(raw.activeTimer) ? (raw.activeTimer as Partial<ActiveTimerState>) : {};

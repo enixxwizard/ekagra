@@ -28,13 +28,16 @@ import {
   ToastMessage,
 } from '../types/dayflow';
 import type {
+  PdfAutoSyncCommitResult,
   PdfBreakPeriodItem,
   PdfDailyPlanItem,
   PdfDeadlineItem,
   PdfMonthlyGoalItem,
   PdfWeeklyPlanItem,
+  StructuredPdfPlan,
 } from '../types/pdfSchedule';
-import type { ScheduleEnhancementChange } from '../types/scheduleEnhancer';
+import type { ScheduleEnhancementChange } from '../types/eku';
+import type { ActiveReminderItem, CalendarFocusTarget } from '../types/reminder';
 import { CATEGORY_DEFAULT_COLORS } from '../utils/colors';
 import {
   generateId,
@@ -43,7 +46,14 @@ import {
   minutesToTime24,
   parseTimeToMinutes,
 } from '../utils/dateTime';
-import { checkAndFireActivityReminders } from '../utils/notifications';
+import {
+  clearAllReminderStateForScope,
+  clearReminderKeysForActivityIds,
+  evaluateActivityReminders,
+  markReminderDismissed,
+  markReminderSnoozed,
+} from '../utils/notifications';
+import { evaluatePdfAutoSync } from '../utils/pdfAutoSync';
 import { computeImportFingerprint } from '../utils/pdfExtractor';
 import {
   detectRecurringScheduleConflicts,
@@ -197,9 +207,26 @@ interface DayFlowContextValue {
     scope?: 'single' | 'series'
   ) => void;
   rolloverActivityToDate: (activity: ResolvedActivity, targetDate: string) => void;
-  applyScheduleEnhancements: (changes: ScheduleEnhancementChange[]) => { appliedCount: number };
-  // Focus Timer
+  applyScheduleEnhancements: (
+    changes: ScheduleEnhancementChange[]
+  ) => Promise<{ appliedCount: number; persisted: boolean; error?: string }>;
+  // Full-screen activity reminders & calendar deep-link
+  reminderQueue: ActiveReminderItem[];
+  calendarFocusTarget: CalendarFocusTarget | null;
+  consumeCalendarFocusTarget: () => void;
+  viewReminderInSchedule: (reminderKey: string) => void;
+  snoozeReminder: (reminderKey: string, minutes?: number) => void;
+  dismissReminder: (reminderKey: string) => void;
+  // Focus Timer & Deep Focus State
+  isFocusFullscreen: boolean;
+  setFocusFullscreen: (fullscreen: boolean) => void;
+  isDeepFocusActive: boolean;
   startTimer: () => void;
+  startFocusSession: (
+    durationMinutes: number,
+    mode?: FocusModeType,
+    linkedActivityId?: string | null
+  ) => void;
   pauseTimer: () => void;
   resumeTimer: () => void;
   resetTimer: (overrideDurationMinutes?: number) => void;
@@ -225,6 +252,9 @@ interface DayFlowContextValue {
     items: PdfSuggestedActivity[]
   ) => { added: number; skippedDuplicates: number; withConflicts: number };
   importStructuredPdfPlan: (payload: StructuredPdfImportPayload) => StructuredPdfImportResult;
+  syncStructuredPdfPlan: (
+    plan: StructuredPdfPlan
+  ) => Promise<{ commit: PdfAutoSyncCommitResult; reviewPlan: StructuredPdfPlan }>;
   pendingPdfPickerOpen: boolean;
   consumePendingPdfPickerOpen: () => void;
   openCapturePdfImport: () => void;
@@ -265,6 +295,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [calendarTab, setCalendarTab] = useState<CalendarSubTab>('timeline');
   const [insightsTab, setInsightsTab] = useState<InsightsSubTab>('overview');
   const [isQuickAddTaskOpen, setQuickAddTaskOpen] = useState(false);
+  const [isFocusFullscreen, setFocusFullscreen] = useState(false);
   const [pendingPdfPickerOpen, setPendingPdfPickerOpen] = useState(false);
   const [quickActivitySheet, setQuickActivitySheet] = useState<QuickActivitySheetPayload>({
     isOpen: false,
@@ -293,6 +324,8 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setQuickActivitySheet({ isOpen: false, editingActivity: null });
   }, []);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [reminderQueue, setReminderQueue] = useState<ActiveReminderItem[]>([]);
+  const [calendarFocusTarget, setCalendarFocusTarget] = useState<CalendarFocusTarget | null>(null);
   const [lastCompletedSessionId, setLastCompletedSessionId] = useState<string | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number>(() =>
     computeRemainingSeconds(state)
@@ -308,6 +341,9 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const cloudSchemaReadyRef = useRef(false);
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  const reminderScopeKey =
+    authStatus === 'authenticated' && user ? user.id : 'guest';
 
   const pushToast = useCallback((toast: Omit<ToastMessage, 'id'>) => {
     const id = generateId();
@@ -336,7 +372,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           type: 'warning',
           title: 'Recovered from invalid local data',
           description:
-            'Stored browser data was unreadable and has been safely reset so DayFlow can run normally.',
+            'Stored browser data was unreadable and has been safely reset so Ekagra can run normally.',
         });
       }
       return;
@@ -530,7 +566,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
             Notification.permission === 'granted'
           ) {
             try {
-              new Notification('DayFlow Focus Session Complete', {
+              new Notification('Ekagra Focus Session Complete', {
                 body:
                   prev.activeTimer.mode === 'focus'
                     ? 'Focus block finished! Time for a short break.'
@@ -574,40 +610,116 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   }, [state.activeTimer.status, state.activeTimer.durationSeconds, finalizeTimerSession, pushToast]);
 
-  // Reminder polling for today's activities
+  // Reminder polling for today's activities (persisted across refreshes, supports queue + snooze)
   useEffect(() => {
+    if (authStatus === 'authenticated' && loadedScopeRef.current !== user?.id) {
+      return;
+    }
+
     const runCheck = () => {
       const todayISO = getTodayISO();
       const todayActs = resolveActivitiesForDate(state.activities, todayISO);
-      checkAndFireActivityReminders(
-        todayActs,
-        state.settings.reminderLeadMinutes,
-        state.settings.timeFormat,
-        state.settings.notificationsEnabled,
-        (act, lead) => {
-          if (state.settings.soundAlerts) {
-            playGentleChime();
-          }
-          pushToast({
-            type: 'info',
-            title: lead === 0 ? `Starting now: ${act.title}` : `Upcoming in ${lead}m: ${act.title}`,
-            description: `${act.category} · ${act.startTime} – ${act.endTime}`,
-          });
+
+      // Remove any queued reminder whose activity is no longer pending today
+      setReminderQueue((prev) => {
+        if (prev.length === 0) return prev;
+        const activePendingKeys = new Set(
+          todayActs
+            .filter((a) => a.status === 'pending')
+            .map((a) => `${a.instanceId}::${a.startTime}`)
+        );
+        const filtered = prev.filter((item) => activePendingKeys.has(item.key));
+        return filtered.length === prev.length ? prev : filtered;
+      });
+
+      const newlyTriggered = evaluateActivityReminders({
+        scopeKey: reminderScopeKey,
+        todayActivities: todayActs,
+        leadMinutes: state.settings.reminderLeadMinutes,
+        timeFormat: state.settings.timeFormat,
+        notificationsEnabled: state.settings.notificationsEnabled,
+      });
+
+      if (newlyTriggered.length > 0) {
+        if (state.settings.soundAlerts) {
+          playGentleChime();
         }
-      );
+        setReminderQueue((prev) => {
+          const existingKeys = new Set(prev.map((item) => item.key));
+          const additions = newlyTriggered.filter((item) => !existingKeys.has(item.key));
+          if (additions.length === 0) return prev;
+          return [...prev, ...additions].sort((a, b) =>
+            a.startTime.localeCompare(b.startTime)
+          );
+        });
+      }
     };
 
     runCheck();
-    const id = window.setInterval(runCheck, 15000);
-    return () => window.clearInterval(id);
+    const id = window.setInterval(runCheck, 5000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        runCheck();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [
+    authStatus,
+    user?.id,
+    reminderScopeKey,
     state.activities,
     state.settings.reminderLeadMinutes,
     state.settings.timeFormat,
     state.settings.notificationsEnabled,
     state.settings.soundAlerts,
-    pushToast,
   ]);
+
+  const consumeCalendarFocusTarget = useCallback(() => {
+    setCalendarFocusTarget(null);
+  }, []);
+
+  const viewReminderInSchedule = useCallback(
+    (reminderKey: string) => {
+      const target = reminderQueue.find((r) => r.key === reminderKey);
+      markReminderDismissed(reminderScopeKey, reminderKey);
+      setReminderQueue((prev) => prev.filter((r) => r.key !== reminderKey));
+      if (target) {
+        setCalendarTab('timeline');
+        setCalendarFocusTarget({
+          date: target.occurrenceDate,
+          activityId: target.activityId,
+          nonce: Date.now(),
+        });
+        setActivePage('calendar');
+      }
+    },
+    [reminderQueue, reminderScopeKey]
+  );
+
+  const snoozeReminder = useCallback(
+    (reminderKey: string, minutes = 5) => {
+      markReminderSnoozed(reminderScopeKey, reminderKey, minutes);
+      setReminderQueue((prev) => prev.filter((r) => r.key !== reminderKey));
+      pushToast({
+        type: 'info',
+        title: `Snoozed for ${minutes} minutes`,
+        description: 'Ekagra will remind you again while open.',
+      });
+    },
+    [reminderScopeKey, pushToast]
+  );
+
+  const dismissReminder = useCallback(
+    (reminderKey: string) => {
+      markReminderDismissed(reminderScopeKey, reminderKey);
+      setReminderQueue((prev) => prev.filter((r) => r.key !== reminderKey));
+    },
+    [reminderScopeKey]
+  );
 
   // Task operations
   const saveTask = useCallback((input: TaskFormInput): TaskItem => {
@@ -782,8 +894,9 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
         activities: [...prev.activities, saved],
       };
     });
+    clearReminderKeysForActivityIds(reminderScopeKey, [saved.id]);
     return saved;
-  }, []);
+  }, [reminderScopeKey]);
 
   const updateActivityOccurrence = useCallback(
     (
@@ -834,8 +947,9 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           };
         }),
       }));
+      clearReminderKeysForActivityIds(reminderScopeKey, [activityId]);
     },
-    []
+    [reminderScopeKey]
   );
 
   const setActivityStatus = useCallback(
@@ -947,10 +1061,14 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   const applyScheduleEnhancements = useCallback(
-    (changes: ScheduleEnhancementChange[]): { appliedCount: number } => {
+    async (
+      changes: ScheduleEnhancementChange[]
+    ): Promise<{ appliedCount: number; persisted: boolean; error?: string }> => {
       if (!Array.isArray(changes) || changes.length === 0) {
-        return { appliedCount: 0 };
+        return { appliedCount: 0, persisted: false, error: 'No changes to apply.' };
       }
+
+      const touchedActivityIds: string[] = [];
 
       const applyOnState = (source: DayFlowState): { nextState: DayFlowState; count: number } => {
         const now = new Date().toISOString();
@@ -963,6 +1081,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
             const idx = nextActivities.findIndex((a) => a.id === ch.activityId);
             if (idx === -1) continue;
             const act = nextActivities[idx];
+            touchedActivityIds.push(act.id);
             const isRecurring = (act.recurrence?.frequency ?? 'none') !== 'none';
 
             if (!isRecurring) {
@@ -1061,7 +1180,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
             nextActivities.push({
               id: generateId(),
               title: ch.title.trim() || 'Recovery break',
-              description: 'Scheduled break from DayFlow Schedule Enhancer',
+              description: 'Scheduled break added with Eku',
               date: ch.date,
               startTime: ch.startTime,
               endTime: ch.endTime,
@@ -1092,13 +1211,43 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       const preview = applyOnState(stateRef.current);
       if (preview.count === 0) {
-        return { appliedCount: 0 };
+        return {
+          appliedCount: 0,
+          persisted: false,
+          error: 'Target item no longer exists or is already completed.',
+        };
       }
 
-      setState((prev) => applyOnState(prev).nextState);
-      return { appliedCount: preview.count };
+      if (authStatus === 'authenticated' && user) {
+        if (loadedScopeRef.current !== user.id || !cloudSchemaReadyRef.current) {
+          return {
+            appliedCount: 0,
+            persisted: false,
+            error: 'Cloud workspace is not ready yet. Wait a moment and retry.',
+          };
+        }
+        try {
+          await supabaseDayFlowRepository.saveForUser(user.id, preview.nextState);
+          cloudSyncErrorShownRef.current = false;
+        } catch (err) {
+          return {
+            appliedCount: 0,
+            persisted: false,
+            error:
+              err instanceof Error
+                ? `Could not save to cloud: ${err.message}`
+                : 'Could not save schedule changes to Supabase.',
+          };
+        }
+      } else {
+        dayFlowRepository.save(preview.nextState);
+      }
+
+      setState(preview.nextState);
+      clearReminderKeysForActivityIds(reminderScopeKey, touchedActivityIds);
+      return { appliedCount: preview.count, persisted: true };
     },
-    []
+    [authStatus, user, reminderScopeKey]
   );
 
   // Focus Timer operations
@@ -1113,6 +1262,33 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
       },
     }));
   }, []);
+
+  const startFocusSession = useCallback(
+    (
+      durationMinutes: number,
+      mode: FocusModeType = 'focus',
+      linkedActivityId?: string | null
+    ) => {
+      const clampedMinutes = Math.max(1, Math.min(180, Math.round(durationMinutes)));
+      const nextSeconds = clampedMinutes * 60;
+      setRemainingSeconds(nextSeconds);
+      setState((prev) => ({
+        ...prev,
+        activeTimer: {
+          mode,
+          status: 'running',
+          durationSeconds: nextSeconds,
+          startedAtMs: Date.now(),
+          elapsedBeforePauseMs: 0,
+          linkedActivityId:
+            linkedActivityId !== undefined
+              ? linkedActivityId
+              : prev.activeTimer.linkedActivityId,
+        },
+      }));
+    },
+    []
+  );
 
   const pauseTimer = useCallback(() => {
     setState((prev) => {
@@ -1515,12 +1691,17 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     (
       prev: DayFlowState,
       payload: StructuredPdfImportPayload
-    ): { nextState: DayFlowState; summary: StructuredPdfImportResult } => {
+    ): {
+      nextState: DayFlowState;
+      summary: StructuredPdfImportResult;
+      addedActivityIds: string[];
+    } => {
       const now = new Date().toISOString();
       const nextActivities = [...prev.activities];
       const nextTasks = [...prev.tasks];
       const nextNotes = [...prev.notes];
       const fingerprintSet = new Set(prev.importedFingerprints);
+      const addedActivityIds: string[] = [];
 
       let activitiesAdded = 0;
       let recurringRulesAdded = 0;
@@ -1575,6 +1756,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           fingerprintSet.add(ruleFingerprint);
           nextActivities.push(rule);
           newlyAddedRules.push(rule);
+          addedActivityIds.push(rule.id);
           activitiesAdded += 1;
           if (rule.recurrence.frequency !== 'none') {
             recurringRulesAdded += 1;
@@ -1645,6 +1827,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
 
           nextActivities.push(candidate);
+          addedActivityIds.push(candidate.id);
           fingerprintSet.add(itemFingerprint);
           activitiesAdded += 1;
         }
@@ -1760,6 +1943,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           skippedDuplicates,
           conflictsCount,
         },
+        addedActivityIds,
       };
     },
     []
@@ -1767,11 +1951,120 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const importStructuredPdfPlan = useCallback(
     (payload: StructuredPdfImportPayload): StructuredPdfImportResult => {
-      const { summary } = applyStructuredPdfImport(state, payload);
+      const { summary, addedActivityIds } = applyStructuredPdfImport(stateRef.current, payload);
       setState((prev) => applyStructuredPdfImport(prev, payload).nextState);
+      if (addedActivityIds.length > 0) {
+        clearReminderKeysForActivityIds(reminderScopeKey, addedActivityIds);
+      }
       return summary;
     },
-    [state, applyStructuredPdfImport]
+    [applyStructuredPdfImport, reminderScopeKey]
+  );
+
+  const syncStructuredPdfPlan = useCallback(
+    async (
+      plan: StructuredPdfPlan
+    ): Promise<{ commit: PdfAutoSyncCommitResult; reviewPlan: StructuredPdfPlan }> => {
+      const currentState = stateRef.current;
+      const evaluation = evaluatePdfAutoSync({
+        plan,
+        existingActivities: currentState.activities,
+        existingTasks: currentState.tasks,
+        existingNotes: currentState.notes,
+        importedFingerprints: currentState.importedFingerprints,
+        referenceDateISO: getTodayISO(),
+      });
+
+      const { nextState, summary, addedActivityIds } = applyStructuredPdfImport(
+        currentState,
+        evaluation.payload
+      );
+
+      const totalDuplicatesSkipped = evaluation.duplicatesSkipped + summary.skippedDuplicates;
+      const totalConflictsCount = Math.max(evaluation.conflictsCount, summary.conflictsCount);
+      const totalNewRecords =
+        summary.activitiesAdded + summary.tasksAdded + summary.notesAdded;
+
+      if (totalNewRecords === 0) {
+        const status: PdfAutoSyncCommitResult['status'] =
+          evaluation.reviewItems.length > 0
+            ? 'needs_review'
+            : totalDuplicatesSkipped > 0
+            ? 'duplicates_only'
+            : 'empty';
+
+        return {
+          commit: {
+            status,
+            persisted: true,
+            activitiesAdded: 0,
+            recurringRulesAdded: 0,
+            tasksAdded: 0,
+            notesAdded: 0,
+            duplicatesSkipped: totalDuplicatesSkipped,
+            conflictsCount: totalConflictsCount,
+            reviewItems: evaluation.reviewItems,
+            timetableDiff: evaluation.timetableDiff,
+          },
+          reviewPlan: evaluation.reviewPlan,
+        };
+      }
+
+      try {
+        if (authStatus === 'authenticated' && user) {
+          if (!cloudSchemaReadyRef.current) {
+            throw new Error(
+              'Cloud database tables are not ready yet. Run the Supabase SQL migration or check your connection before syncing.'
+            );
+          }
+          await supabaseDayFlowRepository.saveForUser(user.id, nextState);
+        } else {
+          dayFlowRepository.save(nextState);
+        }
+      } catch (err) {
+        return {
+          commit: {
+            status: 'error',
+            persisted: false,
+            error:
+              err instanceof Error
+                ? err.message
+                : 'Could not save synced schedule entries to storage.',
+            activitiesAdded: 0,
+            recurringRulesAdded: 0,
+            tasksAdded: 0,
+            notesAdded: 0,
+            duplicatesSkipped: totalDuplicatesSkipped,
+            conflictsCount: totalConflictsCount,
+            reviewItems: evaluation.reviewItems,
+            timetableDiff: evaluation.timetableDiff,
+          },
+          reviewPlan: evaluation.reviewPlan,
+        };
+      }
+
+      setState(nextState);
+      if (addedActivityIds.length > 0) {
+        clearReminderKeysForActivityIds(reminderScopeKey, addedActivityIds);
+      }
+
+      return {
+        commit: {
+          status: 'synced',
+          persisted: true,
+          activitiesAdded: summary.activitiesAdded,
+          recurringRulesAdded: summary.recurringRulesAdded,
+          tasksAdded: summary.tasksAdded,
+          notesAdded: summary.notesAdded,
+          duplicatesSkipped: totalDuplicatesSkipped,
+          conflictsCount: totalConflictsCount,
+          reviewItems: evaluation.reviewItems,
+          timetableDiff: evaluation.timetableDiff,
+        },
+        reviewPlan: evaluation.reviewPlan,
+      };
+    },
+    [applyStructuredPdfImport, authStatus, user, reminderScopeKey]
   );
 
   // Settings & Persistence
@@ -1813,6 +2106,8 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   const clearAllData = useCallback(() => {
+    clearAllReminderStateForScope(reminderScopeKey);
+    setReminderQueue([]);
     if (authStatus === 'authenticated' && user) {
       const fallbackName = user.fullName?.trim() || user.email?.split('@')[0] || 'Alex';
       const cleared = createEmptyState({ userName: fallbackName });
@@ -1823,7 +2118,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const cleared = dayFlowRepository.clear();
     setState(cleared);
     setRemainingSeconds(cleared.activeTimer.durationSeconds);
-  }, [authStatus, user]);
+  }, [authStatus, user, reminderScopeKey]);
 
   const value: DayFlowContextValue = {
     state,
@@ -1854,7 +2149,19 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     deleteActivity,
     rolloverActivityToDate,
     applyScheduleEnhancements,
+    reminderQueue,
+    calendarFocusTarget,
+    consumeCalendarFocusTarget,
+    viewReminderInSchedule,
+    snoozeReminder,
+    dismissReminder,
+    isFocusFullscreen,
+    setFocusFullscreen,
+    isDeepFocusActive:
+      isFocusFullscreen ||
+      (activePage === 'focus' && state.activeTimer.status === 'running'),
     startTimer,
+    startFocusSession,
     pauseTimer,
     resumeTimer,
     resetTimer,
@@ -1875,6 +2182,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     isFingerprintImported,
     importPdfActivities,
     importStructuredPdfPlan,
+    syncStructuredPdfPlan,
     pendingPdfPickerOpen,
     consumePendingPdfPickerOpen,
     openCapturePdfImport,

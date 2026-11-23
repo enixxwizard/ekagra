@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, Eye, EyeOff, Loader2, Mail } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
+import { BiIcon } from '../ui/BiIcon';
 import {
   isUnconfirmedEmailError,
   MIN_PASSWORD_LENGTH,
@@ -74,7 +74,7 @@ const PasswordField: React.FC<PasswordFieldProps> = ({
           aria-label={visible ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}
           className="absolute top-1/2 right-2.5 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--df-text-muted)] hover:text-[var(--df-text)] disabled:opacity-40"
         >
-          {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          {visible ? <BiIcon name="eye-slash" className="text-sm" /> : <BiIcon name="eye" className="text-sm" />}
         </button>
       </div>
 
@@ -187,7 +187,7 @@ export const EmailAuthForm: React.FC<EmailAuthFormProps> = ({ mode, onModeChange
       <div className="space-y-4">
         <div className="rounded-2xl border border-[var(--df-accent-border)] bg-[var(--df-accent-soft)] p-4">
           <div className="flex items-start gap-3">
-            <Mail className="mt-0.5 h-5 w-5 shrink-0 text-[var(--df-accent-soft-fg)]" />
+            <BiIcon name="envelope" className="mt-0.5 text-base shrink-0 text-[var(--df-accent-soft-fg)]" />
             <div className="space-y-1.5 text-xs leading-relaxed text-[var(--df-text)]">
               <h2 className="font-display text-base font-bold">Check your email</h2>
               <p className="text-[var(--df-text-muted)]">
@@ -216,7 +216,7 @@ export const EmailAuthForm: React.FC<EmailAuthFormProps> = ({ mode, onModeChange
             onClick={() => void handleResend()}
             className="flex min-h-[46px] w-full items-center justify-center gap-2 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-sm font-semibold text-[var(--df-text)] transition-colors hover:border-[var(--df-border-strong)] hover:bg-[var(--df-surface-hover)] disabled:opacity-50"
           >
-            {isSubmittingEmailAuth && <Loader2 className="h-4 w-4 animate-spin" />}
+            {isSubmittingEmailAuth && <BiIcon name="arrow-repeat" spin className="text-sm" />}
             <span>
               {resendCooldown > 0
                 ? `Resend confirmation (${resendCooldown}s)`
@@ -268,7 +268,7 @@ export const EmailAuthForm: React.FC<EmailAuthFormProps> = ({ mode, onModeChange
             Set a new password
           </h2>
           <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
-            Choose a strong new password of at least {MIN_PASSWORD_LENGTH} characters for your DayFlow account.
+            Choose a strong new password of at least {MIN_PASSWORD_LENGTH} characters for your Ekagra account.
           </p>
         </div>
 
@@ -313,7 +313,7 @@ export const EmailAuthForm: React.FC<EmailAuthFormProps> = ({ mode, onModeChange
           disabled={disabledAll}
           className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 text-sm font-semibold text-[var(--df-accent-fg)] transition-colors hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isSubmittingEmailAuth && <Loader2 className="h-4 w-4 animate-spin" />}
+          {isSubmittingEmailAuth && <BiIcon name="arrow-repeat" spin className="text-sm" />}
           <span>{isSubmittingEmailAuth ? 'Updating password...' : 'Update password'}</span>
         </button>
 
@@ -371,7 +371,7 @@ export const EmailAuthForm: React.FC<EmailAuthFormProps> = ({ mode, onModeChange
             role="status"
             className="flex items-start gap-2.5 rounded-2xl border border-[var(--df-accent-border)] bg-[var(--df-accent-soft)] px-3.5 py-3 text-xs leading-relaxed text-[var(--df-text)]"
           >
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[var(--df-accent-soft-fg)]" />
+            <BiIcon name="check-circle" className="mt-0.5 text-sm shrink-0 text-[var(--df-accent-soft-fg)]" />
             <p>
               If an account exists for <span className="font-semibold">{email.trim()}</span>, a password reset link has been sent. Open the link in this browser to set a new password.
             </p>
@@ -421,7 +421,7 @@ export const EmailAuthForm: React.FC<EmailAuthFormProps> = ({ mode, onModeChange
           disabled={disabledAll}
           className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 text-sm font-semibold text-[var(--df-accent-fg)] transition-colors hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isSubmittingEmailAuth && <Loader2 className="h-4 w-4 animate-spin" />}
+          {isSubmittingEmailAuth && <BiIcon name="arrow-repeat" spin className="text-sm" />}
           <span>{isSubmittingEmailAuth ? 'Sending reset link...' : 'Send reset link'}</span>
         </button>
 
@@ -538,7 +538,7 @@ export const EmailAuthForm: React.FC<EmailAuthFormProps> = ({ mode, onModeChange
           disabled={disabledAll}
           className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 text-sm font-semibold text-[var(--df-accent-fg)] transition-colors hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isSubmittingEmailAuth && <Loader2 className="h-4 w-4 animate-spin" />}
+          {isSubmittingEmailAuth && <BiIcon name="arrow-repeat" spin className="text-sm" />}
           <span>{isSubmittingEmailAuth ? 'Creating account...' : 'Create Account'}</span>
         </button>
 
@@ -687,7 +687,7 @@ export const EmailAuthForm: React.FC<EmailAuthFormProps> = ({ mode, onModeChange
         disabled={disabledAll}
         className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 text-sm font-semibold text-[var(--df-accent-fg)] transition-colors hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {isSubmittingEmailAuth && <Loader2 className="h-4 w-4 animate-spin" />}
+        {isSubmittingEmailAuth && <BiIcon name="arrow-repeat" spin className="text-sm" />}
         <span>{isSubmittingEmailAuth ? 'Signing in...' : 'Sign In'}</span>
       </button>
 

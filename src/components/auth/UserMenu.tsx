@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Cloud, HardDrive, LogIn, LogOut, Settings, User } from 'lucide-react';
 import { useDayFlow } from '../../context/DayFlowContext';
 import { useAuth } from '../../hooks/useAuth';
+import { BiIcon } from '../ui/BiIcon';
 
 export const UserMenu: React.FC = () => {
   const {
@@ -81,7 +81,7 @@ export const UserMenu: React.FC = () => {
             />
           ) : (
             <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-[var(--df-accent)] text-[11px] font-bold text-[var(--df-accent-fg)]">
-              {initials || <User className="h-3.5 w-3.5" />}
+              {initials || <BiIcon name="person" className="text-xs" />}
             </span>
           )}
           <span className="hidden max-w-[100px] truncate sm:inline">{displayName}</span>
@@ -94,7 +94,7 @@ export const UserMenu: React.FC = () => {
           aria-label="Guest mode menu"
           className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-3 text-xs font-medium text-[var(--df-text-muted)] transition-colors hover:border-[var(--df-border-strong)] hover:text-[var(--df-text)]"
         >
-          <User className="h-3.5 w-3.5" />
+          <BiIcon name="person" className="text-xs" />
           <span className="hidden sm:inline">Guest</span>
         </button>
       )}
@@ -116,7 +116,7 @@ export const UserMenu: React.FC = () => {
                   </p>
                 )}
                 <p className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-[var(--df-accent-soft-fg)]">
-                  <Cloud className="h-3 w-3" />
+                  <BiIcon name="cloud-check" className="text-xs" />
                   Authenticated cloud account
                 </p>
               </div>
@@ -131,7 +131,7 @@ export const UserMenu: React.FC = () => {
                   }}
                   className="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-xs font-medium text-[var(--df-text)] transition-colors hover:bg-[var(--df-surface-hover)]"
                 >
-                  <Settings className="h-3.5 w-3.5 text-[var(--df-text-muted)]" />
+                  <BiIcon name="sliders" className="text-xs text-[var(--df-text-muted)]" />
                   Settings &amp; Backups
                 </button>
                 <button
@@ -141,7 +141,7 @@ export const UserMenu: React.FC = () => {
                   onClick={() => void handleSignOut()}
                   className="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
                 >
-                  <LogOut className="h-3.5 w-3.5" />
+                  <BiIcon name="box-arrow-right" className="text-xs" />
                   {isSigningOut ? 'Signing out...' : 'Sign out'}
                 </button>
               </div>
@@ -153,7 +153,7 @@ export const UserMenu: React.FC = () => {
                   Guest Mode
                 </p>
                 <p className="mt-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--df-text-muted)]">
-                  <HardDrive className="mt-0.5 h-3 w-3 shrink-0" />
+                  <BiIcon name="hdd" className="mt-0.5 text-xs shrink-0" />
                   Saved in this browser only. Not backed up online.
                 </p>
               </div>
@@ -168,7 +168,7 @@ export const UserMenu: React.FC = () => {
                       onClick={() => void handleGuestGoogleSignIn()}
                       className="flex w-full items-center gap-2 rounded-xl bg-[var(--df-accent)] px-3 py-2 text-left text-xs font-semibold text-[var(--df-accent-fg)] transition-all hover:brightness-95 disabled:opacity-50"
                     >
-                      <LogIn className="h-3.5 w-3.5" />
+                      <BiIcon name="box-arrow-in-right" className="text-xs" />
                       {isSigningIn ? 'Connecting...' : 'Sign in with Google'}
                     </button>
                     <button
@@ -181,7 +181,7 @@ export const UserMenu: React.FC = () => {
                       }}
                       className="flex w-full items-center gap-2 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-3 py-2 text-left text-xs font-semibold text-[var(--df-text)] transition-colors hover:border-[var(--df-border-strong)] disabled:opacity-50"
                     >
-                      <LogIn className="h-3.5 w-3.5" />
+                      <BiIcon name="box-arrow-in-right" className="text-xs" />
                       Sign in with Email
                     </button>
                   </>
@@ -200,7 +200,7 @@ export const UserMenu: React.FC = () => {
                   }}
                   className="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-xs font-medium text-[var(--df-text)] transition-colors hover:bg-[var(--df-surface-hover)]"
                 >
-                  <Settings className="h-3.5 w-3.5 text-[var(--df-text-muted)]" />
+                  <BiIcon name="sliders" className="text-xs text-[var(--df-text-muted)]" />
                   Settings &amp; Backups
                 </button>
               </div>

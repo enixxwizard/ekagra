@@ -123,3 +123,33 @@ export interface StructuredPdfPlan {
   warnings: PdfValidationWarning[];
   cached?: boolean;
 }
+
+export interface PdfAutoSyncReviewItem {
+  id: string;
+  section: 'weekly' | 'daily' | 'deadlines';
+  title: string;
+  reason: string;
+  sourcePage?: number;
+}
+
+export interface PdfTimetableDiff {
+  hasPreviousImportFromFile: boolean;
+  addedTitles: string[];
+  changedTitles: string[];
+  removedTitles: string[];
+}
+
+export interface PdfAutoSyncCommitResult {
+  status: 'synced' | 'duplicates_only' | 'needs_review' | 'empty' | 'error';
+  persisted: boolean;
+  error?: string;
+  activitiesAdded: number;
+  recurringRulesAdded: number;
+  tasksAdded: number;
+  notesAdded: number;
+  duplicatesSkipped: number;
+  conflictsCount: number;
+  reviewItems: PdfAutoSyncReviewItem[];
+  timetableDiff: PdfTimetableDiff;
+}
+

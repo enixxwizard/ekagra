@@ -1,28 +1,43 @@
 import 'dotenv/config';
-import express, { type Request, type Response } from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   computeDocumentHash,
   sanitizeIsoDate,
   validateAndAuditStructuredPlan,
 } from './src/utils/pdfSchemaValidator';
 import type { ExtractedPdfTable, StructuredPdfPlan } from './src/types/pdfSchedule';
-import type {
-  EnhancerActivitySnapshot,
-  EnhancerTaskSnapshot,
-  ScheduleEnhancementResponseBody,
-} from './src/types/scheduleEnhancer';
+import { verifyEkuRequestAuth } from './server/ekuAuth';
+import { getSearchApiConfig } from './server/ekuSearch';
 import {
-  isValidIsoDate,
-  isValidTime24,
-  logEnhancerDiagnostic,
-  runDeterministicScheduleAnalysis,
-  sanitizeActivitiesForEnhancer,
-  validateEnhancementSuggestions,
-} from './src/utils/scheduleEnhancer';
+  getOpenAIConfig,
+  runEkuConversationTurn,
+  sanitizeEkuRequestBody,
+} from './server/ekuAgent';
+import {
+  createLibraryResource,
+  deleteLibraryResource,
+  getLibraryResourceById,
+  inspectAndImportLibraryUrl,
+  listLibraryResources,
+  MAX_LIBRARY_COVER_BYTES,
+  MAX_LIBRARY_PDF_BYTES,
+  sanitizeTextField,
+  saveLibraryCoverFile,
+  saveLibraryPdfFile,
+  serveLibraryCoverFile,
+  serveLibraryPdfFile,
+  updateLibraryResource,
+  verifyLibraryAuth,
+} from './server/libraryStore';
+import type {
+  CreateLibraryResourcePayload,
+  LibraryCoverTemplateId,
+  UpdateLibraryResourcePayload,
+} from './src/types/library';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -92,80 +107,163 @@ function classifyGeminiHttpError(err: unknown): {
   message: string;
   retryable: boolean;
 } {
+  const errObj = err && typeof err === 'object' ? (err as { status?: unknown; code?: unknown }) : null;
+  const numericStatus =
+    typeof errObj?.status === 'number'
+      ? errObj.status
+      : typeof errObj?.code === 'number'
+      ? errObj.code
+      : null;
   const rawMessage = err instanceof Error ? err.message : String(err ?? 'Unknown Gemini error');
   const lower = rawMessage.toLowerCase();
 
-  if (lower.includes('400') || lower.includes('invalid_argument') || lower.includes('bad request')) {
+  if (
+    numericStatus === 400 ||
+    lower.includes('"code":400') ||
+    lower.includes('invalid_argument') ||
+    lower.includes('bad request')
+  ) {
     return {
       status: 400,
-      message: 'Schedule request format was rejected by Gemini.',
+      message: 'AI request format was rejected. Please review your schedule items and retry.',
       retryable: false,
     };
   }
   if (
-    lower.includes('401') ||
-    lower.includes('403') ||
+    numericStatus === 401 ||
+    numericStatus === 403 ||
+    lower.includes('"code":401') ||
+    lower.includes('"code":403') ||
     lower.includes('api_key') ||
     lower.includes('permission_denied') ||
     lower.includes('unauthenticated')
   ) {
     return {
       status: 403,
-      message: 'Gemini API authentication failed on the server. Verify GEMINI_API_KEY configuration.',
-      retryable: false,
-    };
-  }
-  if (lower.includes('404') || lower.includes('not_found')) {
-    return {
-      status: 404,
-      message: 'Configured Gemini model is unavailable.',
-      retryable: false,
-    };
-  }
-  if (lower.includes('429') || lower.includes('resource_exhausted') || lower.includes('rate limit') || lower.includes('quota')) {
-    return {
-      status: 429,
-      message: 'Gemini rate limit reached. Please wait a moment and retry.',
+      message: 'AI service authentication failed on the server. Verify GEMINI_API_KEY configuration.',
       retryable: false,
     };
   }
   if (
-    lower.includes('500') ||
-    lower.includes('502') ||
-    lower.includes('503') ||
-    lower.includes('504') ||
+    numericStatus === 404 ||
+    lower.includes('"code":404') ||
+    lower.includes('not_found')
+  ) {
+    return {
+      status: 404,
+      message: 'Configured AI model is currently unavailable on this server.',
+      retryable: true,
+    };
+  }
+  if (
+    numericStatus === 429 ||
+    lower.includes('"code":429') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('rate limit') ||
+    lower.includes('quota')
+  ) {
+    return {
+      status: 429,
+      message: 'AI rate limit reached. Please wait a moment and retry.',
+      retryable: true,
+    };
+  }
+  if (
+    numericStatus === 500 ||
+    numericStatus === 502 ||
+    numericStatus === 503 ||
+    numericStatus === 504 ||
+    lower.includes('"code":500') ||
+    lower.includes('"code":502') ||
+    lower.includes('"code":503') ||
+    lower.includes('"code":504') ||
     lower.includes('unavailable') ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded') ||
     lower.includes('timeout') ||
+    lower.includes('timed out') ||
     lower.includes('econnreset') ||
     lower.includes('fetch failed')
   ) {
     return {
       status: 503,
-      message: 'Gemini service is temporarily unavailable. Please try again.',
+      message: 'AI service temporarily unavailable due to high demand. Please retry in a moment.',
       retryable: true,
     };
   }
 
   return {
     status: 502,
-    message: 'Schedule analysis failed due to an upstream AI error. Please retry.',
-    retryable: false,
+    message: 'AI service encountered an upstream error. Please retry.',
+    retryable: true,
   };
 }
 
-async function generateWithTransientRetry<T>(fn: () => Promise<T>): Promise<T> {
-  const delays = [500, 1200];
+function parseGeminiJsonObject(rawText: string): Record<string, unknown> {
+  const trimmed = rawText.trim();
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = (fenceMatch ? fenceMatch[1] : trimmed).trim();
+
+  try {
+    const parsed = JSON.parse(candidate);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    const firstBrace = candidate.indexOf('{');
+    const lastBrace = candidate.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      const sliced = JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
+      if (sliced && typeof sliced === 'object' && !Array.isArray(sliced)) {
+        return sliced as Record<string, unknown>;
+      }
+    }
+  }
+
+  throw new Error('Malformed JSON object in Gemini response');
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function generateWithTransientRetry<T>(
+  fn: (modelName: string) => Promise<T>,
+  primaryModel = 'gemini-4-hydrogen',
+  fallbackModel = 'gemini-3.1-flash-lite'
+): Promise<T> {
+  const attempts: Array<{ model: string; waitBeforeMs: number; timeoutMs: number }> = [
+    { model: primaryModel, waitBeforeMs: 0, timeoutMs: 16_000 },
+    { model: fallbackModel, waitBeforeMs: 200, timeoutMs: 14_000 },
+    { model: primaryModel, waitBeforeMs: 500, timeoutMs: 15_000 },
+  ];
   let lastError: unknown;
-  for (let attempt = 0; attempt <= delays.length; attempt++) {
+  for (let i = 0; i < attempts.length; i++) {
+    const { model, waitBeforeMs, timeoutMs } = attempts[i];
+    if (waitBeforeMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitBeforeMs));
+    }
     try {
-      return await fn();
+      return await withTimeout(fn(model), timeoutMs, `Gemini (${model})`);
     } catch (err) {
       lastError = err;
       const classified = classifyGeminiHttpError(err);
-      if (!classified.retryable || attempt === delays.length) {
+      console.warn(
+        `[Ekagra AI] attempt ${i + 1}/${attempts.length} (${model}) failed with HTTP ${classified.status}`
+      );
+      if (!classified.retryable || i === attempts.length - 1) {
         throw err;
       }
-      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
     }
   }
   throw lastError;
@@ -177,9 +275,14 @@ async function startServer() {
   app.use(express.json({ limit: '8mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
+    const searchCfg = getSearchApiConfig();
     res.json({
       ok: true,
       geminiConfigured: Boolean(getGeminiClient()),
+      openaiConfigured: getOpenAIConfig().configured,
+      searchConfigured: Boolean(
+        searchCfg.tavilyKey || searchCfg.braveKey || searchCfg.youtubeKey
+      ),
     });
   });
 
@@ -318,12 +421,16 @@ async function startServer() {
     parts.push({ text: promptText });
 
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: { parts },
-        config: {
-          systemInstruction: [
-            'You are a precision timetable and academic schedule extraction engine for DayFlow.',
+      const response = await generateWithTransientRetry((modelName) =>
+        ai.models.generateContent({
+          model: modelName,
+          contents: { parts },
+          config: {
+            ...(modelName === 'gemini-4-hydrogen'
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
+            systemInstruction: [
+              'You are a precision timetable and academic schedule extraction engine for Ekagra.',
             'Your task is to classify PDF schedules into structured JSON with exact table-cell fidelity.',
             '',
             'STRICT CLASSIFICATION RULES:',
@@ -487,10 +594,11 @@ async function startServer() {
             ],
           },
         },
-      });
+        })
+      );
 
       const rawJson = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+      const parsed = parseGeminiJsonObject(rawJson);
 
       const validated = validateAndAuditStructuredPlan(parsed, {
         fileName,
@@ -502,399 +610,341 @@ async function startServer() {
       setCachedPlan(cacheKey, validated);
       res.json(validated);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Gemini PDF analysis failed.';
+      const classified = classifyGeminiHttpError(err);
+      res.status(classified.status).json({ error: classified.message });
+    }
+  });
+
+  app.post('/api/eku/chat', async (req: Request, res: Response) => {
+    const auth = await verifyEkuRequestAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
+      return;
+    }
+
+    const parsedReq = sanitizeEkuRequestBody(req.body);
+    if (!parsedReq.valid || !parsedReq.data) {
+      res.status(400).json({ error: parsedReq.error ?? 'Invalid request payload.' });
+      return;
+    }
+
+    try {
+      const result = await runEkuConversationTurn(parsedReq.data);
+      res.json(result);
+    } catch (err) {
+      const errObj = err as Error & { status?: number };
       const status =
-        message.includes('403') || message.includes('API_KEY')
-          ? 403
-          : message.includes('429') || message.includes('RESOURCE_EXHAUSTED')
-          ? 429
+        typeof errObj?.status === 'number' && errObj.status >= 400 && errObj.status < 600
+          ? errObj.status
           : 502;
+      const message =
+        err instanceof Error && err.message.trim()
+          ? err.message
+          : 'Eku could not reach the AI service right now. Please try again.';
       res.status(status).json({ error: message });
     }
   });
 
-  app.post('/api/schedule/enhance', async (req: Request, res: Response) => {
-    const rawBody = (req.body ?? {}) as Record<string, unknown>;
-    const todayISO = isValidIsoDate(rawBody.todayISO)
-      ? rawBody.todayISO
-      : new Date().toISOString().slice(0, 10);
-    const nowMinutes =
-      typeof rawBody.nowMinutes === 'number' && Number.isFinite(rawBody.nowMinutes)
-        ? Math.max(0, Math.min(1439, Math.round(rawBody.nowMinutes)))
-        : new Date().getHours() * 60 + new Date().getMinutes();
-    const timeZone =
-      typeof rawBody.timeZone === 'string' && rawBody.timeZone.trim()
-        ? rawBody.timeZone.trim().slice(0, 64)
-        : 'Local Time';
-    const dailyCapacityHours =
-      typeof rawBody.dailyCapacityHours === 'number' && Number.isFinite(rawBody.dailyCapacityHours)
-        ? Math.max(2, Math.min(16, rawBody.dailyCapacityHours))
-        : 8;
+  // ============================================================================
+  // EKAGRA Smart Digital Library API (Strictly owner-scoped & path-confined)
+  // ============================================================================
 
-    const rawActivities = Array.isArray(rawBody.activities) ? rawBody.activities : [];
-    const rawTasks = Array.isArray(rawBody.tasks) ? rawBody.tasks : [];
-
-    // Strip any unconsented fields (descriptions, notes, quotations, auth fields)
-    const allowedCategories = new Set(['Work', 'Study', 'Health', 'Personal', 'Deep Work', 'Admin']);
-    const allowedPriorities = new Set(['low', 'medium', 'high']);
-    const allowedStatuses = new Set(['pending', 'completed', 'skipped']);
-    const allowedFrequencies = new Set(['none', 'daily', 'weekdays', 'weekly', 'custom']);
-
-    const cleanActivities: EnhancerActivitySnapshot[] = [];
-    for (const item of rawActivities.slice(0, 300)) {
-      if (!item || typeof item !== 'object') continue;
-      const a = item as Record<string, unknown>;
-      if (typeof a.id !== 'string' || typeof a.title !== 'string') continue;
-      const recRaw = (a.recurrence && typeof a.recurrence === 'object'
-        ? a.recurrence
-        : {}) as Record<string, unknown>;
-      const frequency =
-        typeof recRaw.frequency === 'string' && allowedFrequencies.has(recRaw.frequency)
-          ? (recRaw.frequency as EnhancerActivitySnapshot['recurrence']['frequency'])
-          : 'none';
-      const customDays = Array.isArray(recRaw.customDays)
-        ? recRaw.customDays.filter((d): d is number => typeof d === 'number' && d >= 0 && d <= 6)
-        : undefined;
-      const endDate =
-        typeof recRaw.endDate === 'string' && isValidIsoDate(recRaw.endDate)
-          ? recRaw.endDate
-          : null;
-
-      const overrides: EnhancerActivitySnapshot['occurrenceOverrides'] = {};
-      if (a.occurrenceOverrides && typeof a.occurrenceOverrides === 'object') {
-        for (const [k, v] of Object.entries(a.occurrenceOverrides as Record<string, unknown>)) {
-          if (!isValidIsoDate(k) || !v || typeof v !== 'object') continue;
-          const ov = v as Record<string, unknown>;
-          overrides[k] = {
-            title: typeof ov.title === 'string' ? ov.title.trim().slice(0, 120) : undefined,
-            startTime: isValidTime24(ov.startTime) ? ov.startTime : undefined,
-            endTime: isValidTime24(ov.endTime) ? ov.endTime : undefined,
-            category:
-              typeof ov.category === 'string' && allowedCategories.has(ov.category)
-                ? (ov.category as EnhancerActivitySnapshot['category'])
-                : undefined,
-            priority:
-              typeof ov.priority === 'string' && allowedPriorities.has(ov.priority)
-                ? (ov.priority as EnhancerActivitySnapshot['priority'])
-                : undefined,
-            status:
-              typeof ov.status === 'string' && allowedStatuses.has(ov.status)
-                ? (ov.status as EnhancerActivitySnapshot['status'])
-                : undefined,
-          };
-        }
-      }
-
-      cleanActivities.push({
-        id: a.id.trim().slice(0, 80),
-        title: a.title.trim().slice(0, 120),
-        date: typeof a.date === 'string' ? a.date.trim() : '',
-        startTime: typeof a.startTime === 'string' ? a.startTime.trim() : '',
-        endTime: typeof a.endTime === 'string' ? a.endTime.trim() : '',
-        category:
-          typeof a.category === 'string' && allowedCategories.has(a.category)
-            ? (a.category as EnhancerActivitySnapshot['category'])
-            : 'Personal',
-        priority:
-          typeof a.priority === 'string' && allowedPriorities.has(a.priority)
-            ? (a.priority as EnhancerActivitySnapshot['priority'])
-            : 'medium',
-        status:
-          typeof a.status === 'string' && allowedStatuses.has(a.status)
-            ? (a.status as EnhancerActivitySnapshot['status'])
-            : 'pending',
-        linkedTaskId: typeof a.linkedTaskId === 'string' ? a.linkedTaskId.trim().slice(0, 80) : null,
-        recurrence: {
-          frequency,
-          customDays,
-          endDate,
-        },
-        excludedDates: Array.isArray(a.excludedDates)
-          ? a.excludedDates.filter((d): d is string => isValidIsoDate(d))
-          : [],
-        occurrenceOverrides: overrides,
-      });
-    }
-
-    const cleanTasks: EnhancerTaskSnapshot[] = [];
-    for (const item of rawTasks.slice(0, 200)) {
-      if (!item || typeof item !== 'object') continue;
-      const t = item as Record<string, unknown>;
-      if (typeof t.id !== 'string' || typeof t.title !== 'string') continue;
-      cleanTasks.push({
-        id: t.id.trim().slice(0, 80),
-        title: t.title.trim().slice(0, 120),
-        priority:
-          typeof t.priority === 'string' && allowedPriorities.has(t.priority)
-            ? (t.priority as EnhancerTaskSnapshot['priority'])
-            : 'medium',
-        dueDate: typeof t.dueDate === 'string' && isValidIsoDate(t.dueDate) ? t.dueDate : null,
-        category:
-          typeof t.category === 'string' && allowedCategories.has(t.category)
-            ? (t.category as EnhancerTaskSnapshot['category'])
-            : 'Study',
-        completed: Boolean(t.completed),
-        estimatedMinutes:
-          typeof t.estimatedMinutes === 'number' && Number.isFinite(t.estimatedMinutes)
-            ? Math.max(10, Math.min(480, Math.round(t.estimatedMinutes)))
-            : 30,
-        scheduledActivityId:
-          typeof t.scheduledActivityId === 'string' ? t.scheduledActivityId.trim().slice(0, 80) : null,
-      });
-    }
-
-    if (cleanActivities.length === 0) {
-      const emptyResponse: ScheduleEnhancementResponseBody = {
-        status: 'empty',
-        emptyReason: 'no_activities',
-        message: 'Add activities to your schedule before requesting AI suggestions.',
-        summary: 'No schedule activities yet.',
-        suggestions: [],
-        deterministicSummary: {
-          overlapsCount: 0,
-          overloadedDaysCount: 0,
-          deadlineConflictsCount: 0,
-          flexibleBlocksCount: 0,
-          breakOpportunitiesCount: 0,
-        },
-      };
-      res.json(emptyResponse);
+  app.get('/api/library/resources', async (req: Request, res: Response) => {
+    const auth = await verifyLibraryAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
       return;
     }
-
-    const report = runDeterministicScheduleAnalysis({
-      activities: cleanActivities,
-      tasks: cleanTasks,
-      todayISO,
-      nowMinutes,
-      timeZone,
-      dailyCapacityHours,
-      horizonDays: 7,
-    });
-
-    const deterministicSummary = {
-      overlapsCount: report.overlaps.length,
-      overloadedDaysCount: report.overloadedDaysCount,
-      deadlineConflictsCount: report.deadlineFindings.length,
-      flexibleBlocksCount: report.flexibleBlocksCount,
-      breakOpportunitiesCount: report.days.reduce((sum, d) => sum + d.contiguousWorkRuns.length, 0),
-    };
-
-    logEnhancerDiagnostic('deterministic_completed', {
-      validOccurrences: report.validOccurrencesCount,
-      invalidActivities: report.invalidActivitiesCount,
-      overlaps: deterministicSummary.overlapsCount,
-      overloadedDays: deterministicSummary.overloadedDaysCount,
-      deadlineFindings: deterministicSummary.deadlineConflictsCount,
-    });
-
-    const ai = getGeminiClient();
-    if (!ai) {
-      res.status(503).json({
-        error:
-          'Gemini API key is not configured on the server. Add GEMINI_API_KEY in environment secrets to enable Improve My Plan.',
-      });
-      return;
-    }
-
-    const currentHour = Math.floor(nowMinutes / 60);
-    const currentMin = nowMinutes % 60;
-    const currentTimeLabel = `${String(currentHour).padStart(2, '0')}:${String(currentMin).padStart(2, '0')}`;
-
-    const promptContext = {
-      todayISO,
-      currentTime24: currentTimeLabel,
-      nowMinutes,
-      timeZone,
-      dailyCapacityHours,
-      overlaps: report.overlaps,
-      deadlineFindings: report.deadlineFindings,
-      days: report.days.map((d) => ({
-        date: d.date,
-        weekday: d.weekday,
-        plannedMinutes: d.plannedMinutes,
-        capacityMinutes: d.capacityMinutes,
-        isOverloaded: d.isOverloaded,
-        overloadMinutes: d.overloadMinutes,
-        freeMinutesAfterNow: d.freeMinutesAfterNow,
-        openSlots: d.openSlots.slice(0, 8),
-        contiguousWorkRuns: d.contiguousWorkRuns,
-        blocks: d.blocks,
-      })),
-    };
-
-    logEnhancerDiagnostic('gemini_request_started', {
-      daysAnalyzed: report.days.length,
-      sourceActivities: report.totalSourceActivities,
-    });
-
     try {
-      const response = await generateWithTransientRetry(() =>
-        ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
-          contents: [
-            'Analyze this pre-computed 7-day DayFlow schedule report and propose up to 3 high-impact, realistic improvements.',
-            '',
-            JSON.stringify(promptContext),
-          ].join('\n'),
-          config: {
-            systemInstruction: [
-              'You are DayFlow AI Schedule Coach. Produce realistic, concrete, conflict-free schedule improvements.',
-              'STRICT RULES:',
-              '1. Propose AT MOST 3 suggestions in "suggestions", ordered by highest practical impact (resolving overlaps, deadline risks, overloaded days, or long contiguous study/work streaks without breaks).',
-              '2. If the schedule is already balanced with no overlaps, no overloaded days, no urgent unscheduled deadlines, and adequate breaks, set "noImprovementsNeeded": true and "suggestions": []. Do NOT invent unnecessary churn.',
-              '3. ONLY reference exact existing activityId values from days[].blocks and exact existing taskId values from deadlineFindings.',
-              '4. Respect fixed vs flexible commitments: prefer moving commitmentType: "flexible" blocks rather than "fixed" blocks (completed, high-priority, recurring, or already started today). If moving a recurring block is genuinely required, set scope: "single" on a single date.',
-              '5. NEVER place any activity or break into a past time slot! On todayISO, every newStartTime or startTime MUST be >= currentTime24. All dates MUST be between todayISO and 7 days ahead.',
-              '6. EVERY proposed block MUST fit strictly inside openSlots (or replace the moved block without overlapping ANY other block in days[].blocks). Use exact 24-hour HH:mm times and YYYY-MM-DD dates.',
-              '7. Change types allowed in changes[]:',
-              '   - type: "reschedule_activity" -> MUST include activityId, occurrenceDate (the day the block currently occurs), newDate, newStartTime, newEndTime, scope ("single" | "series"). If newDate != occurrenceDate, scope MUST be "single".',
-              '   - type: "schedule_task" -> MUST include taskId, date, startTime, endTime.',
-              '   - type: "insert_break" -> MUST include title (short break name like "15m Recovery Break"), date, startTime, endTime (5-60 min, placed inside a gap or openSlot).',
-              '8. Every suggestion MUST clearly populate title, reason, evidence (referencing specific days/times/conflicts from the report), beforePreview, afterPreview, and tradeOffs (honest side-effects or "Minimal trade-off").',
-            ].join('\n'),
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                summary: { type: Type.STRING },
-                noImprovementsNeeded: { type: Type.BOOLEAN },
-                suggestions: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      id: { type: Type.STRING },
-                      title: { type: Type.STRING },
-                      reason: { type: Type.STRING },
-                      evidence: { type: Type.STRING },
-                      beforePreview: { type: Type.STRING },
-                      afterPreview: { type: Type.STRING },
-                      tradeOffs: { type: Type.STRING },
-                      changes: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            type: { type: Type.STRING },
-                            activityId: { type: Type.STRING },
-                            occurrenceDate: { type: Type.STRING },
-                            newDate: { type: Type.STRING },
-                            newStartTime: { type: Type.STRING },
-                            newEndTime: { type: Type.STRING },
-                            scope: { type: Type.STRING },
-                            taskId: { type: Type.STRING },
-                            title: { type: Type.STRING },
-                            date: { type: Type.STRING },
-                            startTime: { type: Type.STRING },
-                            endTime: { type: Type.STRING },
-                          },
-                          required: ['type'],
-                        },
-                      },
-                    },
-                    required: [
-                      'title',
-                      'reason',
-                      'evidence',
-                      'beforePreview',
-                      'afterPreview',
-                      'tradeOffs',
-                      'changes',
-                    ],
-                  },
-                },
-              },
-              required: ['summary', 'noImprovementsNeeded', 'suggestions'],
-            },
-          },
-        })
-      );
+      const resources = await listLibraryResources(auth.scopeId);
+      res.json({ resources });
+    } catch {
+      res.status(500).json({ error: 'Unable to load your library right now.' });
+    }
+  });
 
-      logEnhancerDiagnostic('gemini_response_received', {
-        hasText: Boolean(response.text?.trim()),
+  app.post('/api/library/resources', async (req: Request, res: Response) => {
+    const auth = await verifyLibraryAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
+      return;
+    }
+    const body = (req.body ?? {}) as Partial<CreateLibraryResourcePayload>;
+    if (!body || typeof body !== 'object') {
+      res.status(400).json({ error: 'Invalid library resource payload.' });
+      return;
+    }
+    try {
+      const created = await createLibraryResource(auth.scopeId, {
+        title: typeof body.title === 'string' ? body.title : 'Untitled Resource',
+        subtitle: typeof body.subtitle === 'string' ? body.subtitle : '',
+        subject: typeof body.subject === 'string' ? body.subject : 'General Studies',
+        description: typeof body.description === 'string' ? body.description : '',
+        resourceType: body.resourceType === 'external_url' ? 'external_url' : 'pdf',
+        originalFileName: body.originalFileName ?? null,
+        originalFileSize: body.originalFileSize ?? null,
+        originalUrl: body.originalUrl ?? null,
+        coverTemplate: (body.coverTemplate as LibraryCoverTemplateId) ?? 'charcoal_tech',
+        totalPages: typeof body.totalPages === 'number' ? body.totalPages : null,
+        topics: Array.isArray(body.topics) ? body.topics : [],
+        lastReadPage: typeof body.lastReadPage === 'number' ? body.lastReadPage : undefined,
+        analysisStatus: body.analysisStatus ?? 'complete',
+        analysisNote: body.analysisNote ?? null,
       });
+      res.status(201).json({ resource: created });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to save library resource.';
+      res.status(400).json({ error: msg });
+    }
+  });
 
-      const rawText = (response.text ?? '').trim();
-      if (!rawText) {
-        res.status(502).json({
-          error: 'Gemini returned an empty response. Please retry.',
-        });
+  app.get('/api/library/resources/:id', async (req: Request, res: Response) => {
+    const auth = await verifyLibraryAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
+      return;
+    }
+    try {
+      const resource = await getLibraryResourceById(auth.scopeId, String(req.params.id || ''));
+      if (!resource) {
+        res.status(404).json({ error: 'Resource not found.' });
         return;
       }
+      res.json({ resource });
+    } catch {
+      res.status(500).json({ error: 'Unable to load resource details.' });
+    }
+  });
 
-      let parsed: {
-        summary?: unknown;
-        noImprovementsNeeded?: unknown;
-        suggestions?: unknown;
-      };
+  app.patch('/api/library/resources/:id', async (req: Request, res: Response) => {
+    const auth = await verifyLibraryAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
+      return;
+    }
+    const patch = (req.body ?? {}) as UpdateLibraryResourcePayload;
+    try {
+      const updated = await updateLibraryResource(
+        auth.scopeId,
+        String(req.params.id || ''),
+        patch
+      );
+      if (!updated) {
+        res.status(404).json({ error: 'Resource not found.' });
+        return;
+      }
+      res.json({ resource: updated });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to update resource.';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/library/resources/:id', async (req: Request, res: Response) => {
+    const auth = await verifyLibraryAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
+      return;
+    }
+    try {
+      const deleted = await deleteLibraryResource(auth.scopeId, String(req.params.id || ''));
+      if (!deleted) {
+        res.status(404).json({ error: 'Resource not found.' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ error: 'Unable to delete resource.' });
+    }
+  });
+
+  app.post(
+    '/api/library/resources/:id/file',
+    express.raw({
+      type: ['application/pdf', 'application/octet-stream'],
+      limit: MAX_LIBRARY_PDF_BYTES,
+    }),
+    async (req: Request, res: Response) => {
+      const auth = await verifyLibraryAuth(req);
+      if (!auth.authenticated) {
+        res.status(auth.status).json({ error: auth.error });
+        return;
+      }
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        res.status(400).json({ error: 'No PDF binary payload was uploaded.' });
+        return;
+      }
+      const rawNameHeader = req.headers['x-file-name'];
+      const decodedName =
+        typeof rawNameHeader === 'string'
+          ? (() => {
+              try {
+                return decodeURIComponent(rawNameHeader);
+              } catch {
+                return rawNameHeader;
+              }
+            })()
+          : undefined;
       try {
-        parsed = JSON.parse(rawText);
-      } catch {
-        res.status(502).json({
-          error: 'Gemini returned malformed JSON. Please retry.',
-        });
-        return;
-      }
-
-      const { valid: sanitizedActivities } = sanitizeActivitiesForEnhancer(cleanActivities);
-      const { validSuggestions, rejectedReasons } = validateEnhancementSuggestions(
-        parsed.suggestions,
-        {
-          activities: sanitizedActivities,
-          tasks: cleanTasks,
-          todayISO,
-          nowMinutes,
-        }
-      );
-
-      logEnhancerDiagnostic('suggestions_validated', {
-        accepted: validSuggestions.length,
-        rejected: rejectedReasons.length,
-      });
-
-      const summaryText =
-        typeof parsed.summary === 'string' && parsed.summary.trim()
-          ? parsed.summary.trim()
-          : 'Analyzed your upcoming 7-day schedule.';
-
-      if (validSuggestions.length === 0) {
-        if (rejectedReasons.length > 0 && report.hasActionableFindings) {
-          res.status(422).json({
-            error:
-              'Suggested schedule edits failed conflict or timeline validation. Please retry for a fresh conflict-free plan.',
-          });
+        const updated = await saveLibraryPdfFile(
+          auth.scopeId,
+          String(req.params.id || ''),
+          req.body,
+          decodedName
+        );
+        if (!updated) {
+          res.status(404).json({ error: 'Resource record not found.' });
           return;
         }
+        res.json({ resource: updated });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Invalid PDF file upload.';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
 
-        const emptyResult: ScheduleEnhancementResponseBody = {
-          status: 'empty',
-          emptyReason: 'no_improvements',
-          message: 'No meaningful improvements found',
-          summary: summaryText,
-          suggestions: [],
-          deterministicSummary,
-          rejectedCount: rejectedReasons.length,
-        };
-        res.json(emptyResult);
+  app.get('/api/library/resources/:id/file', async (req: Request, res: Response) => {
+    const auth = await verifyLibraryAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
+      return;
+    }
+    await serveLibraryPdfFile(req, res, auth.scopeId, String(req.params.id || ''));
+  });
+
+  app.post(
+    '/api/library/resources/:id/cover',
+    express.raw({
+      type: ['image/png', 'application/octet-stream'],
+      limit: MAX_LIBRARY_COVER_BYTES,
+    }),
+    async (req: Request, res: Response) => {
+      const auth = await verifyLibraryAuth(req);
+      if (!auth.authenticated) {
+        res.status(auth.status).json({ error: auth.error });
+        return;
+      }
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        res.status(400).json({ error: 'No PNG cover image payload was uploaded.' });
+        return;
+      }
+      try {
+        const updated = await saveLibraryCoverFile(
+          auth.scopeId,
+          String(req.params.id || ''),
+          req.body
+        );
+        if (!updated) {
+          res.status(404).json({ error: 'Resource record not found.' });
+          return;
+        }
+        res.json({ resource: updated });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Invalid cover image upload.';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  app.get('/api/library/resources/:id/cover', async (req: Request, res: Response) => {
+    const auth = await verifyLibraryAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
+      return;
+    }
+    await serveLibraryCoverFile(req, res, auth.scopeId, String(req.params.id || ''));
+  });
+
+  app.post('/api/library/import-url', async (req: Request, res: Response) => {
+    const auth = await verifyLibraryAuth(req);
+    if (!auth.authenticated) {
+      res.status(auth.status).json({ error: auth.error });
+      return;
+    }
+    const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+    if (!rawUrl) {
+      res.status(400).json({ error: 'Please enter a resource URL.' });
+      return;
+    }
+    try {
+      const inspected = await inspectAndImportLibraryUrl(rawUrl);
+      if (inspected.kind === 'pdf_buffer') {
+        const cleanTitle =
+          sanitizeTextField(inspected.fileName.replace(/\.pdf$/i, '').replace(/[-_]+/g, ' '), 160) ||
+          'Imported PDF';
+        const created = await createLibraryResource(auth.scopeId, {
+          title: cleanTitle,
+          subtitle: '',
+          subject: 'General Studies',
+          description: `PDF imported from ${new URL(inspected.safeUrl).hostname}.`,
+          resourceType: 'pdf',
+          originalFileName: inspected.fileName,
+          originalFileSize: inspected.buffer.length,
+          originalUrl: inspected.safeUrl,
+          coverTemplate: 'charcoal_tech',
+          totalPages: null,
+          topics: [],
+          lastReadPage: 1,
+          analysisStatus: 'complete',
+          analysisNote: null,
+        });
+        const saved = await saveLibraryPdfFile(
+          auth.scopeId,
+          created.id,
+          inspected.buffer,
+          inspected.fileName
+        );
+        res.status(201).json({
+          kind: 'pdf_imported',
+          safeUrl: inspected.safeUrl,
+          suggestedTitle: cleanTitle,
+          suggestedDescription: created.description,
+          note: 'PDF downloaded and saved to your library.',
+          resource: saved ?? created,
+        });
         return;
       }
 
-      const successResult: ScheduleEnhancementResponseBody = {
-        status: 'success',
-        summary: summaryText,
-        suggestions: validSuggestions,
-        deterministicSummary,
-        rejectedCount: rejectedReasons.length,
-      };
-      res.json(successResult);
+      res.json(inspected);
     } catch (err) {
-      const classified = classifyGeminiHttpError(err);
-      logEnhancerDiagnostic('error_encountered', {
-        status: classified.status,
-      });
-      res.status(classified.status).json({ error: classified.message });
+      const msg = err instanceof Error ? err.message : 'Unable to inspect URL.';
+      res.status(400).json({ error: msg });
     }
+  });
+
+  // Guarantee unmatched /api/* endpoints return JSON rather than SPA index.html
+  app.use('/api', (req: Request, res: Response) => {
+    res.status(404).json({
+      error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+    });
+  });
+
+  // Guarantee Express body-parser / API errors return JSON rather than HTML pages
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    if (!req.path.startsWith('/api')) {
+      next(err);
+      return;
+    }
+    const rawStatus =
+      (err as { status?: unknown; statusCode?: unknown })?.status ??
+      (err as { statusCode?: unknown })?.statusCode;
+    const status = typeof rawStatus === 'number' ? rawStatus : 500;
+    if (status === 413) {
+      res.status(413).json({
+        error: 'Request payload is too large. Please retry with a shorter history.',
+      });
+      return;
+    }
+    if (status === 400) {
+      res.status(400).json({
+        error: 'Invalid JSON request payload sent to the API.',
+      });
+      return;
+    }
+    res.status(status >= 400 && status < 600 ? status : 500).json({
+      error: 'API service encountered an unexpected server error. Please retry.',
+    });
   });
 
   const isProd = process.env.NODE_ENV === 'production';
@@ -924,11 +974,11 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`DayFlow server listening on http://0.0.0.0:${PORT}`);
+    console.log(`Ekagra server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start DayFlow server:', err);
+  console.error('Failed to start Ekagra server:', err);
   process.exit(1);
 });

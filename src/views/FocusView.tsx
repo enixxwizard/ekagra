@@ -1,23 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Check,
-  ChevronDown,
-  ChevronUp,
-  Headphones,
-  Maximize2,
-  Minimize2,
-  Pause,
-  Play,
-  RotateCcw,
-  Sparkles,
-  StickyNote,
-  Trash2,
-  Volume2,
-  VolumeX,
-  X,
-} from 'lucide-react';
 import { FocusMusicPanel } from '../components/focus/FocusMusicPanel';
 import { QuickNotesEditor } from '../components/focus/QuickNotesEditor';
+import { BiIcon } from '../components/ui/BiIcon';
 import { useDayFlow } from '../context/DayFlowContext';
 import { FocusModeType } from '../types/dayflow';
 import {
@@ -47,12 +31,13 @@ export const FocusView: React.FC = () => {
     updateFocusSessionReflection,
     updateSettings,
     pushToast,
+    isFocusFullscreen: isFullscreen,
+    setFocusFullscreen: setIsFullscreen,
   } = useDayFlow();
 
   const [showLog, setShowLog] = useState(false);
   const [musicOpen, setMusicOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [reflectionDraft, setReflectionDraft] = useState('');
   const [reflectionSaved, setReflectionSaved] = useState(false);
 
@@ -99,7 +84,13 @@ export const FocusView: React.FC = () => {
       document.removeEventListener('fullscreenchange', onFullscreenChange);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [isFullscreen]);
+  }, [isFullscreen, setIsFullscreen]);
+
+  useEffect(() => {
+    return () => {
+      setIsFullscreen(false);
+    };
+  }, [setIsFullscreen]);
 
   const toggleFullscreen = async () => {
     if (isFullscreen) {
@@ -253,7 +244,7 @@ export const FocusView: React.FC = () => {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3">
                   <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[var(--df-accent-soft)] text-[var(--df-accent-soft-fg)]">
-                    <Sparkles className="h-4 w-4" />
+                    <BiIcon name="stars" className="text-sm" />
                   </span>
                   <div>
                     <p className="text-xs font-medium text-[var(--df-text-muted)]">
@@ -273,7 +264,7 @@ export const FocusView: React.FC = () => {
                   aria-label="Dismiss session summary"
                   className="rounded-lg p-1.5 text-[var(--df-text-subtle)] hover:text-[var(--df-text)]"
                 >
-                  <X className="h-4 w-4" />
+                  <BiIcon name="x-lg" className="text-sm" />
                 </button>
               </div>
 
@@ -349,7 +340,7 @@ export const FocusView: React.FC = () => {
                       : 'border-[var(--df-border)] bg-[var(--df-bg)] text-[var(--df-text-muted)] hover:text-[var(--df-text)]'
                   }`}
                 >
-                  <Headphones className="h-3.5 w-3.5" />
+                  <BiIcon name="headphones" className="text-xs" />
                   <span className="hidden sm:inline">Music</span>
                   {state.settings.preferredMusicUrl && !musicOpen && (
                     <span
@@ -370,7 +361,7 @@ export const FocusView: React.FC = () => {
                       : 'border-[var(--df-border)] bg-[var(--df-bg)] text-[var(--df-text-muted)] hover:text-[var(--df-text)]'
                   }`}
                 >
-                  <StickyNote className="h-3.5 w-3.5" />
+                  <BiIcon name="sticky" className="text-xs" />
                   <span className="hidden sm:inline">Notes</span>
                 </button>
 
@@ -382,9 +373,9 @@ export const FocusView: React.FC = () => {
                   className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
                 >
                   {settings.soundAlerts ? (
-                    <Volume2 className="h-4 w-4" />
+                    <BiIcon name="volume-up" className="text-sm" />
                   ) : (
-                    <VolumeX className="h-4 w-4" />
+                    <BiIcon name="volume-mute" className="text-sm" />
                   )}
                 </button>
 
@@ -401,9 +392,9 @@ export const FocusView: React.FC = () => {
                   }`}
                 >
                   {isFullscreen ? (
-                    <Minimize2 className="h-4 w-4" />
+                    <BiIcon name="fullscreen-exit" className="text-sm" />
                   ) : (
-                    <Maximize2 className="h-4 w-4" />
+                    <BiIcon name="arrows-fullscreen" className="text-sm" />
                   )}
                 </button>
               </div>
@@ -429,7 +420,7 @@ export const FocusView: React.FC = () => {
                       : 'border-[var(--df-border)] bg-[var(--df-surface)] text-[var(--df-text)] hover:border-[var(--df-border-strong)]'
                   }`}
                 >
-                  <Check className="h-3.5 w-3.5" />
+                  <BiIcon name="check-lg" className="text-xs" />
                   {linkedResolvedToday.status === 'completed' ? 'Done' : 'Complete'}
                 </button>
               )}
@@ -504,7 +495,7 @@ export const FocusView: React.FC = () => {
                   onClick={startTimer}
                   className="inline-flex min-h-[48px] items-center gap-2 rounded-2xl bg-[var(--df-accent)] px-7 text-sm font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 active:scale-[0.98]"
                 >
-                  <Play className="h-4 w-4 fill-current" />
+                  <BiIcon name="play-fill" className="text-base" />
                   Start
                 </button>
               )}
@@ -514,7 +505,7 @@ export const FocusView: React.FC = () => {
                   onClick={pauseTimer}
                   className="inline-flex min-h-[48px] items-center gap-2 rounded-2xl bg-[var(--df-cta)] px-7 text-sm font-semibold text-[var(--df-cta-fg)] transition-transform active:scale-[0.98]"
                 >
-                  <Pause className="h-4 w-4" />
+                  <BiIcon name="pause-fill" className="text-base" />
                   Pause
                 </button>
               )}
@@ -524,7 +515,7 @@ export const FocusView: React.FC = () => {
                   onClick={resumeTimer}
                   className="inline-flex min-h-[48px] items-center gap-2 rounded-2xl bg-[var(--df-accent)] px-7 text-sm font-semibold text-[var(--df-accent-fg)] transition-transform active:scale-[0.98]"
                 >
-                  <Play className="h-4 w-4 fill-current" />
+                  <BiIcon name="play-fill" className="text-base" />
                   Resume
                 </button>
               )}
@@ -535,7 +526,7 @@ export const FocusView: React.FC = () => {
                   onClick={finishAndLogTimerNow}
                   className="inline-flex min-h-[48px] items-center gap-1.5 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-sm font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)]"
                 >
-                  <Check className="h-4 w-4" />
+                  <BiIcon name="check-lg" className="text-sm" />
                   Finish &amp; log
                 </button>
               )}
@@ -547,7 +538,7 @@ export const FocusView: React.FC = () => {
                 title="Reset timer"
                 className="inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-[var(--df-border)] text-[var(--df-text-muted)] hover:border-[var(--df-border-strong)] hover:text-[var(--df-text)]"
               >
-                <RotateCcw className="h-4 w-4" />
+                <BiIcon name="arrow-counterclockwise" className="text-base" />
               </button>
             </div>
 
@@ -630,9 +621,9 @@ export const FocusView: React.FC = () => {
                   </p>
                 </div>
                 {showLog ? (
-                  <ChevronUp className="h-4 w-4 text-[var(--df-text-muted)]" />
+                  <BiIcon name="chevron-up" className="text-sm text-[var(--df-text-muted)]" />
                 ) : (
-                  <ChevronDown className="h-4 w-4 text-[var(--df-text-muted)]" />
+                  <BiIcon name="chevron-down" className="text-sm text-[var(--df-text-muted)]" />
                 )}
               </button>
 
@@ -665,7 +656,7 @@ export const FocusView: React.FC = () => {
                             aria-label="Delete session"
                             className="rounded-lg p-1.5 text-[var(--df-text-subtle)] hover:text-rose-500"
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
+                            <BiIcon name="trash3" className="text-xs" />
                           </button>
                         </li>
                       ))}

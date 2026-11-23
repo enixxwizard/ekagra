@@ -37,6 +37,87 @@ function isSchemaMissingError(error: { code?: string; message?: string } | null)
   );
 }
 
+function isMissingColumnError(
+  error: { code?: string; message?: string } | null,
+  colName: string
+): boolean {
+  if (!error) return false;
+  const code = error.code ?? '';
+  const msg = (error.message ?? '').toLowerCase();
+  return (
+    code === 'PGRST204' ||
+    code === '42703' ||
+    msg.includes(colName.toLowerCase()) ||
+    msg.includes('column')
+  );
+}
+
+function readAutoSyncFallback(userId: string, fallback: boolean): boolean {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(`ekagra_auto_sync_pref_${userId}`);
+    if (raw === 'true') return true;
+    if (raw === 'false') return false;
+  } catch {
+    // Ignore storage read errors
+  }
+  return fallback;
+}
+
+function writeAutoSyncFallback(userId: string, value: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(`ekagra_auto_sync_pref_${userId}`, value ? 'true' : 'false');
+  } catch {
+    // Ignore storage write errors
+  }
+}
+
+function readEkuPrefFallback(userId: string): {
+  preferredResourceLanguage: string | null;
+  ekuMuted: boolean;
+} {
+  if (typeof window === 'undefined') {
+    return { preferredResourceLanguage: null, ekuMuted: false };
+  }
+  try {
+    const raw = window.localStorage.getItem(`ekagra_eku_prefs_${userId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      return {
+        preferredResourceLanguage:
+          typeof parsed.preferredResourceLanguage === 'string' &&
+          parsed.preferredResourceLanguage.trim()
+            ? parsed.preferredResourceLanguage.trim().slice(0, 40)
+            : null,
+        ekuMuted: Boolean(parsed.ekuMuted),
+      };
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return { preferredResourceLanguage: null, ekuMuted: false };
+}
+
+function writeEkuPrefFallback(
+  userId: string,
+  preferredResourceLanguage: string | null | undefined,
+  ekuMuted: boolean | undefined
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      `ekagra_eku_prefs_${userId}`,
+      JSON.stringify({
+        preferredResourceLanguage: preferredResourceLanguage ?? null,
+        ekuMuted: Boolean(ekuMuted),
+      })
+    );
+  } catch {
+    // Ignore storage write errors
+  }
+}
+
 function sanitizeCategory(raw: unknown): ActivityCategory {
   if (
     raw === 'Work' ||
@@ -195,6 +276,12 @@ export class SupabaseDayFlowRepository {
         typeof prefs?.preferred_music_url === 'string' && prefs.preferred_music_url.trim()
           ? prefs.preferred_music_url
           : null,
+      autoSyncPdfSchedule:
+        typeof prefs?.auto_sync_pdf_schedule === 'boolean'
+          ? prefs.auto_sync_pdf_schedule
+          : readAutoSyncFallback(userId, DEFAULT_SETTINGS.autoSyncPdfSchedule),
+      preferredResourceLanguage: readEkuPrefFallback(userId).preferredResourceLanguage,
+      ekuMuted: readEkuPrefFallback(userId).ekuMuted,
     };
 
     const tasks: TaskItem[] = (tasksRes.data ?? []).map((t: Record<string, unknown>) => ({
@@ -342,7 +429,7 @@ export class SupabaseDayFlowRepository {
   async saveForUser(userId: string, state: DayFlowState): Promise<void> {
     if (!supabase) return;
 
-    const prefsPayload = {
+    const prefsPayload: Record<string, unknown> = {
       user_id: userId,
       user_name: state.settings.userName,
       theme: state.settings.theme,
@@ -356,12 +443,30 @@ export class SupabaseDayFlowRepository {
       reminder_lead_minutes: state.settings.reminderLeadMinutes,
       daily_capacity_hours: state.settings.dailyCapacityHours,
       preferred_music_url: state.settings.preferredMusicUrl,
+      auto_sync_pdf_schedule: state.settings.autoSyncPdfSchedule,
       updated_at: new Date().toISOString(),
     };
 
+    writeAutoSyncFallback(userId, state.settings.autoSyncPdfSchedule);
+    writeEkuPrefFallback(
+      userId,
+      state.settings.preferredResourceLanguage,
+      state.settings.ekuMuted
+    );
+
+    let activePrefsPayload: Record<string, unknown> = { ...prefsPayload };
     let { error: prefsError } = await supabase
       .from('user_preferences')
-      .upsert(prefsPayload, { onConflict: 'user_id' });
+      .upsert(activePrefsPayload, { onConflict: 'user_id' });
+
+    if (prefsError && isMissingColumnError(prefsError, 'auto_sync_pdf_schedule')) {
+      const { auto_sync_pdf_schedule: _omit, ...withoutAutoSync } = activePrefsPayload;
+      activePrefsPayload = withoutAutoSync;
+      const retryCol = await supabase
+        .from('user_preferences')
+        .upsert(activePrefsPayload, { onConflict: 'user_id' });
+      prefsError = retryCol.error;
+    }
 
     if (
       prefsError &&
@@ -375,7 +480,7 @@ export class SupabaseDayFlowRepository {
             : 'light';
       const retry = await supabase
         .from('user_preferences')
-        .upsert({ ...prefsPayload, theme: legacyTheme }, { onConflict: 'user_id' });
+        .upsert({ ...activePrefsPayload, theme: legacyTheme }, { onConflict: 'user_id' });
       prefsError = retry.error;
     }
     this.assertNoDbError('Failed saving preferences', prefsError);

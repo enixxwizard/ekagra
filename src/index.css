@@ -4,7 +4,7 @@
 @layer base {
   :root,
   [data-theme="paper"] {
-    --font-display: 'Bricolage Grotesque', 'Plus Jakarta Sans', system-ui, sans-serif;
+    --font-display: 'Sora', 'Bricolage Grotesque', 'Plus Jakarta Sans', system-ui, sans-serif;
     --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
 
@@ -130,6 +130,89 @@
 
 .animate-sheet-up {
   animation: sheetSlideUp 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes reminderEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.985) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-reminder-in {
+  animation: reminderEnter 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes ekuFloat {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes ekuBlink {
+  0%, 92%, 100% {
+    transform: scaleY(1);
+  }
+  96% {
+    transform: scaleY(0.12);
+  }
+}
+
+@keyframes ekuScan {
+  0%, 100% {
+    transform: translateX(-2px);
+  }
+  50% {
+    transform: translateX(2px);
+  }
+}
+
+@keyframes ekuWave {
+  0%, 100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.animate-eku-float {
+  animation: ekuFloat 3.4s ease-in-out infinite;
+}
+
+.animate-eku-blink {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ekuBlink 4.6s ease-in-out infinite;
+}
+
+.animate-eku-scan {
+  animation: ekuScan 0.9s ease-in-out infinite;
+}
+
+.animate-eku-wave-1 {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ekuWave 0.52s ease-in-out infinite;
+}
+
+.animate-eku-wave-2 {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ekuWave 0.52s ease-in-out 0.14s infinite;
+}
+
+.animate-eku-wave-3 {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ekuWave 0.52s ease-in-out 0.28s infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

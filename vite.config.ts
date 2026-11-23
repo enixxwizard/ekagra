@@ -18,7 +18,6 @@ export default defineConfig(() => {
             react: ['react', 'react-dom'],
             charts: ['recharts'],
             dates: ['date-fns'],
-            icons: ['lucide-react'],
           },
         },
       },

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowRight } from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 
 interface GuestModeButtonProps {
   onClick: () => void;
@@ -18,7 +18,7 @@ export const GuestModeButton: React.FC<GuestModeButtonProps> = ({
       className="flex min-h-[50px] w-full items-center justify-center gap-2 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] px-5 text-sm font-semibold text-[var(--df-text)] transition-colors hover:border-[var(--df-border-strong)] hover:bg-[var(--df-surface-hover)] active:scale-[0.99] disabled:opacity-50"
     >
       <span>Continue as Guest</span>
-      <ArrowRight className="h-4 w-4" />
+      <BiIcon name="arrow-right" className="text-[15px]" />
     </button>
   );
 };

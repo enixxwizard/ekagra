@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Sparkles, X } from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 import { useDayFlow } from '../../context/DayFlowContext';
 import { TaskItem } from '../../types/dayflow';
 import {
@@ -86,7 +86,7 @@ export const ScheduleTaskModal: React.FC<ScheduleTaskModalProps> = ({ task, onCl
             aria-label="Close"
             className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--df-text-muted)] transition-colors hover:bg-[var(--df-surface-hover)] hover:text-[var(--df-text)]"
           >
-            <X className="h-4 w-4" />
+            <BiIcon name="x-lg" className="text-[14px]" />
           </button>
         </div>
 
@@ -118,7 +118,7 @@ export const ScheduleTaskModal: React.FC<ScheduleTaskModalProps> = ({ task, onCl
           {suggestedSlots.length > 0 && (
             <div>
               <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-[var(--df-text-muted)]">
-                <Sparkles className="h-3.5 w-3.5 text-[var(--df-accent-soft-fg)]" />
+                <BiIcon name="stars" className="text-[13px] text-[var(--df-accent-soft-fg)]" />
                 Open slots
               </p>
               <div className="grid grid-cols-2 gap-2">

@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { isAuthCallbackUrl } from '../../services/authService';
+import { EkagraMark } from '../ui/EkagraBrand';
 import { AuthCallback } from './AuthCallback';
 import { AuthScreen } from './AuthScreen';
 import { GuestMigrationModal } from './GuestMigrationModal';
@@ -43,11 +44,9 @@ export const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children })
         className="flex min-h-screen items-center justify-center bg-[var(--df-bg)] text-[var(--df-text)]"
       >
         <div className="flex items-center gap-3">
-          <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-[var(--df-accent)] font-display text-xs font-bold text-[var(--df-accent-fg)]">
-            df
-          </span>
+          <EkagraMark size="md" />
           <span className="font-display text-base font-semibold tracking-tight text-[var(--df-text-muted)]">
-            Loading DayFlow...
+            Loading Ekagra...
           </span>
         </div>
       </div>

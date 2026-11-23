@@ -1,5 +1,5 @@
 import React from 'react';
-import { Repeat, X } from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 
 interface RecurringScopeModalProps {
   isOpen: boolean;
@@ -29,7 +29,7 @@ export const RecurringScopeModal: React.FC<RecurringScopeModalProps> = ({
       <div className="animate-sheet-up w-full rounded-t-3xl border border-[var(--df-border)] bg-[var(--df-surface)] sm:max-w-sm sm:rounded-3xl">
         <div className="flex items-center justify-between px-6 pt-5 pb-2">
           <div className="flex items-center gap-2">
-            <Repeat className="h-4 w-4 text-[var(--df-accent-soft-fg)]" />
+            <BiIcon name="repeat" className="text-[15px] text-[var(--df-accent-soft-fg)]" />
             <h2 id="recurring-scope-title" className="font-display text-base font-bold text-[var(--df-text)]">
               {actionLabel} repeat
             </h2>
@@ -40,7 +40,7 @@ export const RecurringScopeModal: React.FC<RecurringScopeModalProps> = ({
             aria-label="Cancel"
             className="rounded-xl p-1.5 text-[var(--df-text-muted)] transition-colors hover:bg-[var(--df-surface-hover)] hover:text-[var(--df-text)]"
           >
-            <X className="h-4 w-4" />
+            <BiIcon name="x-lg" className="text-[14px]" />
           </button>
         </div>
 

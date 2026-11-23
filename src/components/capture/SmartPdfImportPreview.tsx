@@ -1,17 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  AlertTriangle,
-  Calendar,
-  CalendarDays,
-  Check,
-  CheckSquare,
-  Coffee,
-  Edit3,
-  NotebookPen,
-  Sparkles,
-  Target,
-  X,
-} from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 import type { StructuredPdfImportPayload, StructuredPdfImportResult } from '../../context/DayFlowContext';
 import type { ActivityCategory, ScheduleActivity, TimeFormat } from '../../types/dayflow';
 import type {
@@ -315,25 +303,25 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
       id: 'weekly',
       label: 'Weekly Plan',
       count: plan.weeklyPlans.length,
-      icon: <CalendarDays className="h-3.5 w-3.5" />,
+      icon: <BiIcon name="calendar3" className="text-xs" />,
     },
     {
       id: 'daily',
       label: 'Daily Plan',
       count: plan.dailyPlans.length,
-      icon: <Calendar className="h-3.5 w-3.5" />,
+      icon: <BiIcon name="calendar-event" className="text-xs" />,
     },
     {
       id: 'monthly',
       label: 'Monthly Goals',
       count: plan.monthlyGoals.length,
-      icon: <Target className="h-3.5 w-3.5" />,
+      icon: <BiIcon name="bullseye" className="text-xs" />,
     },
     {
       id: 'deadlines',
       label: 'Deadlines',
       count: plan.deadlines.length,
-      icon: <CheckSquare className="h-3.5 w-3.5" />,
+      icon: <BiIcon name="check2-square" className="text-xs" />,
     },
   ];
 
@@ -350,7 +338,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
               {DOC_TYPE_LABELS[plan.documentType]}
             </span>
             <span className="inline-flex items-center gap-1 rounded-lg bg-[var(--df-surface-subtle)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--df-text)]">
-              {plan.analysisSource !== 'local' && <Sparkles className="h-3 w-3" />}
+              {plan.analysisSource !== 'local' && <BiIcon name="stars" className="text-[11px]" />}
               {sourceBadge}
               {plan.cached ? ' · Cached' : ''}
             </span>
@@ -368,7 +356,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
           className="space-y-1.5 rounded-2xl border border-amber-200 bg-amber-50/70 p-3.5 dark:border-amber-900/50 dark:bg-amber-950/25"
         >
           <div className="flex items-center gap-2 text-xs font-semibold text-amber-800 dark:text-amber-300">
-            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <BiIcon name="exclamation-triangle" className="text-sm shrink-0" />
             Please review {plan.warnings.length} extraction{' '}
             {plan.warnings.length === 1 ? 'note' : 'notes'} before importing
           </div>
@@ -563,7 +551,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                                   }`}
                                 >
                                   <div className="flex items-center gap-1 font-medium">
-                                    <Coffee className="h-3 w-3 shrink-0" />
+                                    <BiIcon name="cup-hot" className="text-[11px] shrink-0" />
                                     <span className="truncate">{brk.title}</span>
                                   </div>
                                   <div className="mt-0.5 font-mono text-[10px] opacity-80">
@@ -670,9 +658,9 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                                         className="shrink-0 rounded p-0.5 text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
                                       >
                                         {item.included ? (
-                                          <X className="h-3 w-3" />
+                                          <BiIcon name="x-lg" className="text-[11px]" />
                                         ) : (
-                                          <Check className="h-3 w-3" />
+                                          <BiIcon name="check-lg" className="text-[11px]" />
                                         )}
                                       </button>
                                     </div>
@@ -686,7 +674,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                                         aria-label={`Edit ${item.title}`}
                                         className="text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
                                       >
-                                        <Edit3 className="h-2.5 w-2.5" />
+                                        <BiIcon name="pencil" className="text-[10px]" />
                                       </button>
                                     </div>
                                     {item.provenance !== 'explicit' && (
@@ -723,7 +711,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                   </p>
                   {weeklyConflicts.length > 0 && (
                     <p className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">
-                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      <BiIcon name="exclamation-triangle" className="text-xs shrink-0" />
                       {weeklyConflicts.length} overlap{weeklyConflicts.length === 1 ? '' : 's'} with your existing schedule (first: &ldquo;{weeklyConflicts[0].incomingTitle}&rdquo; vs &ldquo;{weeklyConflicts[0].existingTitle}&rdquo; on {weeklyConflicts[0].date}).
                     </p>
                   )}
@@ -735,7 +723,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                   disabled={previewGroupedRules.length === 0}
                   className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-5 text-xs font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 disabled:opacity-50 whitespace-nowrap shrink-0"
                 >
-                  <Check className="h-3.5 w-3.5" />
+                  <BiIcon name="check-lg" className="text-xs" />
                   {importedSections.weekly
                     ? 'Weekly Plan Imported (Import Again)'
                     : scopeMode === 'one_day'
@@ -766,7 +754,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                   onClick={handleImportDaily}
                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] whitespace-nowrap shrink-0"
                 >
-                  <Check className="h-3.5 w-3.5" />
+                  <BiIcon name="check-lg" className="text-xs" />
                   {importedSections.daily ? 'Imported Daily Items' : 'Import Selected Daily'}
                 </button>
               </div>
@@ -859,7 +847,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                   onClick={handleImportMonthly}
                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] whitespace-nowrap shrink-0"
                 >
-                  <NotebookPen className="h-3.5 w-3.5" />
+                  <BiIcon name="journal-text" className="text-xs" />
                   {importedSections.monthly ? 'Saved to Notes' : 'Save Selected to Notes'}
                 </button>
               </div>
@@ -927,7 +915,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                   onClick={handleImportDeadlines}
                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] whitespace-nowrap shrink-0"
                 >
-                  <Check className="h-3.5 w-3.5" />
+                  <BiIcon name="check-lg" className="text-xs" />
                   {importedSections.deadlines ? 'Added to Tasks' : 'Add Selected to Tasks'}
                 </button>
               </div>

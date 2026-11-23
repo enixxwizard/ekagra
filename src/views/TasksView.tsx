@@ -1,14 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import {
-  CalendarPlus,
-  Check,
-  Pencil,
-  Plus,
-  Search,
-  Trash2,
-} from 'lucide-react';
 import { ScheduleTaskModal } from '../components/modals/ScheduleTaskModal';
 import { TaskModal } from '../components/modals/TaskModal';
+import { BiIcon } from '../components/ui/BiIcon';
 import { useDayFlow } from '../context/DayFlowContext';
 import { ActivityCategory, PriorityLevel, TaskItem } from '../types/dayflow';
 import { formatShortDate, getTodayISO } from '../utils/dateTime';
@@ -106,7 +99,7 @@ export const TasksView: React.FC = () => {
                 : 'border-[var(--df-border)] bg-[var(--df-bg)] text-transparent hover:border-[var(--df-border-strong)]'
             }`}
           >
-            <Check className="h-4 w-4 stroke-[2.5]" />
+            <BiIcon name="check-lg" className="text-sm font-bold" />
           </button>
 
           <div className="min-w-0">
@@ -147,7 +140,7 @@ export const TasksView: React.FC = () => {
               onClick={() => setTaskToSchedule(task)}
               className="inline-flex h-9 items-center gap-1 rounded-xl border border-[var(--df-border)] px-3 text-xs font-medium text-[var(--df-text)] hover:border-[var(--df-border-strong)] whitespace-nowrap"
             >
-              <CalendarPlus className="h-3.5 w-3.5" />
+              <BiIcon name="calendar-plus" className="text-xs" />
               Schedule
             </button>
           )}
@@ -160,7 +153,7 @@ export const TasksView: React.FC = () => {
             aria-label={`Edit ${task.title}`}
             className="rounded-lg p-2 text-[var(--df-text-subtle)] hover:text-[var(--df-text)]"
           >
-            <Pencil className="h-3.5 w-3.5" />
+            <BiIcon name="pencil" className="text-xs" />
           </button>
           <button
             type="button"
@@ -171,7 +164,7 @@ export const TasksView: React.FC = () => {
             aria-label={`Delete ${task.title}`}
             className="rounded-lg p-2 text-[var(--df-text-subtle)] hover:text-rose-600"
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            <BiIcon name="trash3" className="text-xs" />
           </button>
         </div>
       </li>
@@ -207,7 +200,10 @@ export const TasksView: React.FC = () => {
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 sm:w-44 sm:flex-none">
-            <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-[var(--df-text-subtle)]" />
+            <BiIcon
+              name="search"
+              className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-xs text-[var(--df-text-subtle)]"
+            />
             <input
               type="search"
               value={searchQuery}
@@ -250,7 +246,7 @@ export const TasksView: React.FC = () => {
             }}
             className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-[var(--df-cta)] px-3.5 text-xs font-semibold text-[var(--df-cta-fg)] whitespace-nowrap shrink-0"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <BiIcon name="plus-lg" className="text-xs" />
             New task
           </button>
         </div>
@@ -268,7 +264,7 @@ export const TasksView: React.FC = () => {
             }}
             className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 py-2 text-xs font-semibold text-[var(--df-accent-fg)]"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <BiIcon name="plus-lg" className="text-xs" />
             New task
           </button>
         </div>

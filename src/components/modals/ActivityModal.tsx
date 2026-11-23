@@ -1,14 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  AlertTriangle,
-  ChevronDown,
-  ChevronUp,
-  Play,
-  SkipForward,
-  Sparkles,
-  Trash2,
-  X,
-} from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 import { ActivityFormInput, useDayFlow } from '../../context/DayFlowContext';
 import {
   ActivityCategory,
@@ -340,7 +331,7 @@ export const ActivityModal: React.FC<ActivityModalProps> = ({
             aria-label="Close"
             className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--df-text-muted)] hover:bg-[var(--df-surface-hover)] hover:text-[var(--df-text)]"
           >
-            <X className="h-4 w-4" />
+            <BiIcon name="x-lg" className="text-[14px]" />
           </button>
         </div>
 
@@ -443,7 +434,7 @@ export const ActivityModal: React.FC<ActivityModalProps> = ({
           {overlaps.length > 0 && (
             <div className="rounded-2xl border border-amber-300 bg-amber-50/80 p-3 text-xs text-amber-950 dark:border-amber-800/70 dark:bg-amber-950/35 dark:text-amber-200">
               <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                <BiIcon name="exclamation-triangle" className="mt-0.5 text-[15px] shrink-0 text-amber-600" />
                 <div className="flex-1">
                   <p className="font-medium">
                     Overlaps with {overlaps.map((o) => o.title).join(', ')}
@@ -451,7 +442,7 @@ export const ActivityModal: React.FC<ActivityModalProps> = ({
                   {openSlots.length > 0 && (
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
                       <span className="inline-flex items-center gap-1 text-[11px] opacity-80">
-                        <Sparkles className="h-3 w-3" /> Try open slot:
+                        <BiIcon name="stars" className="text-[12px]" /> Try open slot:
                       </span>
                       {openSlots.map((slot) => (
                         <button
@@ -525,7 +516,7 @@ export const ActivityModal: React.FC<ActivityModalProps> = ({
                 onClick={handleQuickFocus}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-3.5 py-2 text-xs font-semibold text-[var(--df-accent-fg)] transition-transform active:scale-95"
               >
-                <Play className="h-3.5 w-3.5" />
+                <BiIcon name="play-fill" className="text-[13px]" />
                 Start Focus
               </button>
               <button
@@ -537,7 +528,7 @@ export const ActivityModal: React.FC<ActivityModalProps> = ({
                 }}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--df-border)] px-3 py-2 text-xs font-medium text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
               >
-                <SkipForward className="h-3.5 w-3.5" />
+                <BiIcon name="skip-forward" className="text-[13px]" />
                 {editingActivity.status === 'skipped' ? 'Unskip' : 'Skip today'}
               </button>
             </div>
@@ -551,7 +542,7 @@ export const ActivityModal: React.FC<ActivityModalProps> = ({
               className="flex w-full items-center justify-between py-1 text-xs font-medium text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
             >
               <span>{showAdvanced ? 'Hide extra options' : 'More options (date, notes, tag, colour)'}</span>
-              {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              <BiIcon name={showAdvanced ? 'chevron-up' : 'chevron-down'} className="text-[14px]" />
             </button>
 
             {showAdvanced && (
@@ -730,7 +721,7 @@ export const ActivityModal: React.FC<ActivityModalProps> = ({
                   onClick={handleDelete}
                   className="inline-flex h-11 items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
                 >
-                  <Trash2 className="h-4 w-4" />
+                  <BiIcon name="trash3" className="text-[15px]" />
                   Delete
                 </button>
               )}

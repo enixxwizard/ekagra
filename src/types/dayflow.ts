@@ -2,6 +2,7 @@ export type NavPage =
   | 'plan'
   | 'focus'
   | 'capture'
+  | 'library'
   | 'calendar'
   | 'insights'
   | 'settings';
@@ -214,6 +215,9 @@ export interface AppSettings {
   reminderLeadMinutes: 0 | 5 | 10 | 15;
   dailyCapacityHours: number;
   preferredMusicUrl: string | null;
+  autoSyncPdfSchedule: boolean;
+  preferredResourceLanguage?: string | null;
+  ekuMuted?: boolean;
 }
 
 export interface DayFlowState {

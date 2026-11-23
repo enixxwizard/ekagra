@@ -1,16 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  CalendarPlus,
-  FileText,
-  FileUp,
-  NotebookPen,
-  Quote,
-  Search,
-  Sparkles,
-  Trash2,
-} from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SmartPdfImportPreview } from '../components/capture/SmartPdfImportPreview';
+import { BiIcon } from '../components/ui/BiIcon';
 import { useDayFlow } from '../context/DayFlowContext';
 import {
   ActivityCategory,
@@ -18,7 +8,11 @@ import {
   QuickNote,
   StudyQuotation,
 } from '../types/dayflow';
-import type { PdfPageImagePayload, StructuredPdfPlan } from '../types/pdfSchedule';
+import type {
+  PdfAutoSyncCommitResult,
+  PdfPageImagePayload,
+  StructuredPdfPlan,
+} from '../types/pdfSchedule';
 import {
   getTodayISO,
   minutesToTime24,
@@ -45,6 +39,33 @@ const CATEGORIES: ActivityCategory[] = [
 
 type CaptureTab = 'pdf' | 'notes';
 
+function extractPdfFileFromClipboard(clipboardData: DataTransfer | null): {
+  pdfFile: File | null;
+  hasTextOnly: boolean;
+} {
+  if (!clipboardData) return { pdfFile: null, hasTextOnly: false };
+
+  const files = Array.from(clipboardData.files ?? []);
+  for (const file of files) {
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      return { pdfFile: file, hasTextOnly: false };
+    }
+  }
+
+  const items = Array.from(clipboardData.items ?? []);
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const f = item.getAsFile();
+      if (f && (f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'))) {
+        return { pdfFile: f, hasTextOnly: false };
+      }
+    }
+  }
+
+  const plainText = clipboardData.getData('text/plain')?.trim() ?? '';
+  return { pdfFile: null, hasTextOnly: plainText.length > 0 || files.length > 0 };
+}
+
 export const CaptureView: React.FC = () => {
   const {
     state,
@@ -55,14 +76,20 @@ export const CaptureView: React.FC = () => {
     saveQuotation,
     deleteQuotation,
     importStructuredPdfPlan,
+    syncStructuredPdfPlan,
+    updateSettings,
+    setActivePage,
     openQuickActivitySheet,
     pushToast,
   } = useDayFlow();
 
   const todayISO = getTodayISO();
   const timeFormat = state.settings.timeFormat;
+  const autoSyncEnabled = state.settings.autoSyncPdfSchedule;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cachedPlansRef = useRef<Map<string, StructuredPdfPlan>>(new Map());
+  const autoSyncRef = useRef(autoSyncEnabled);
+  autoSyncRef.current = autoSyncEnabled;
 
   const [activeTab, setActiveTab] = useState<CaptureTab>('pdf');
   const [isDraggingPdf, setIsDraggingPdf] = useState(false);
@@ -79,6 +106,11 @@ export const CaptureView: React.FC = () => {
   // Optional Gemini server-side enhancement state
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
   const [aiError, setAiError] = useState('');
+
+  // Auto-Sync commit state
+  const [autoSyncing, setAutoSyncing] = useState(false);
+  const [autoSyncResult, setAutoSyncResult] = useState<PdfAutoSyncCommitResult | null>(null);
+  const [lastCandidatePlan, setLastCandidatePlan] = useState<StructuredPdfPlan | null>(null);
 
   // Quick notes & quotations library state
   const [searchQuery, setSearchQuery] = useState('');
@@ -100,92 +132,26 @@ export const CaptureView: React.FC = () => {
     }
   }, [pendingPdfPickerOpen, consumePendingPdfPickerOpen]);
 
-  const handleFilePicked = async (file: File | null) => {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
-      setPdfError('Please select a valid .pdf file.');
-      return;
-    }
-
-    setSelectedFile(file);
-    setPdfError('');
-    setAiError('');
-    setPdfExtracting(true);
-    setPdfExtraction(null);
-    setStructuredPlan(null);
-    setExtractedQuotes([]);
-
-    try {
-      const result = await extractPdfPages(file);
-      setPdfExtraction(result);
-      setIncludeMultimodalSnapshots(result.isScannedOrEmpty || result.hasComplexTables);
-
-      if (result.isScannedOrEmpty) {
-        return;
+  const requestGeminiPlan = useCallback(
+    async (
+      extraction: PdfTextExtractionResult,
+      sourceFile: File | null,
+      forceMultimodal: boolean
+    ): Promise<StructuredPdfPlan> => {
+      const useMultimodal =
+        forceMultimodal || includeMultimodalSnapshots || extraction.isScannedOrEmpty;
+      const cacheKey = `${extraction.documentHash}::${useMultimodal ? 'mm' : 'txt'}`;
+      const clientCached = cachedPlansRef.current.get(cacheKey);
+      if (clientCached) {
+        return { ...clientCached, cached: true };
       }
 
-      const localPlan = parsePdfPagesToStructuredPlan(result.fileName, result.pages, {
-        documentHash: result.documentHash,
-        referenceDateISO: todayISO,
-      });
-
-      setStructuredPlan(localPlan);
-      setExtractedQuotes(localPlan.quotations);
-
-      const totalFound =
-        localPlan.weeklyPlans.length +
-        localPlan.dailyPlans.length +
-        localPlan.monthlyGoals.length +
-        localPlan.deadlines.length +
-        localPlan.quotations.length;
-
-      if (totalFound === 0) {
-        pushToast({
-          type: 'info',
-          title: 'Text extracted from PDF',
-          description:
-            'No obvious timetable rows matched locally. Click "Enhance with Gemini AI" for table-preserving interpretation.',
-        });
-      }
-    } catch (err) {
-      setPdfError(
-        err instanceof Error
-          ? err.message
-          : 'Could not read this PDF file. Please verify it is not password-protected or corrupted.'
-      );
-    } finally {
-      setPdfExtracting(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
-  const handleAnalyzeWithGemini = async (forceMultimodal = false) => {
-    if (!pdfExtraction) return;
-    const useMultimodal = forceMultimodal || includeMultimodalSnapshots || pdfExtraction.isScannedOrEmpty;
-    const cacheKey = `${pdfExtraction.documentHash}::${useMultimodal ? 'mm' : 'txt'}`;
-    const clientCached = cachedPlansRef.current.get(cacheKey);
-
-    if (clientCached) {
-      setStructuredPlan({ ...clientCached, cached: true });
-      setExtractedQuotes(clientCached.quotations);
-      pushToast({
-        type: 'info',
-        title: 'Loaded cached AI analysis',
-        description: 'Using your previous structured extraction for this PDF.',
-      });
-      return;
-    }
-
-    setAiAnalyzing(true);
-    setAiError('');
-
-    try {
       let pageImages: PdfPageImagePayload[] = [];
-      if (useMultimodal && selectedFile) {
-        pageImages = await renderPdfPagesAsImages(selectedFile, 4);
+      if (useMultimodal && sourceFile) {
+        pageImages = await renderPdfPagesAsImages(sourceFile, 4);
       }
 
-      if (pdfExtraction.isScannedOrEmpty && pageImages.length === 0) {
+      if (extraction.isScannedOrEmpty && pageImages.length === 0) {
         throw new Error('Could not render page snapshots from this scanned PDF.');
       }
 
@@ -193,22 +159,300 @@ export const CaptureView: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          fileName: pdfExtraction.fileName,
-          documentHash: pdfExtraction.documentHash,
+          fileName: extraction.fileName,
+          documentHash: extraction.documentHash,
           referenceDate: todayISO,
-          pages: pdfExtraction.pages as ExtractedPdfPage[],
+          pages: extraction.pages as ExtractedPdfPage[],
           pageImages,
         }),
       });
 
-      const data = (await res.json()) as StructuredPdfPlan & { error?: string };
+      const contentType = res.headers.get('content-type') ?? '';
+      const rawText = await res.text().catch(() => '');
+      const trimmed = rawText.trim();
+      const isHtml =
+        contentType.includes('text/html') || /^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed);
+
+      let data: (StructuredPdfPlan & { error?: string }) | null = null;
+      if (trimmed && !isHtml) {
+        try {
+          data = JSON.parse(trimmed) as StructuredPdfPlan & { error?: string };
+        } catch {
+          data = null;
+        }
+      }
+
       if (!res.ok) {
-        throw new Error(data.error || 'Gemini analysis failed.');
+        throw new Error(
+          data?.error ||
+            (res.status === 503 || res.status === 502 || res.status === 504
+              ? 'AI service temporarily unavailable. Please retry in a moment.'
+              : `Gemini analysis failed (HTTP ${res.status}).`)
+        );
+      }
+
+      if (!data || isHtml) {
+        throw new Error('AI analysis received an unexpected non-JSON response. Please retry.');
       }
 
       cachedPlansRef.current.set(cacheKey, data);
+      return data;
+    },
+    [includeMultimodalSnapshots, todayISO]
+  );
+
+  const runAutoSync = useCallback(
+    async (planToSync: StructuredPdfPlan) => {
+      setAutoSyncing(true);
+      setAutoSyncResult(null);
+      setLastCandidatePlan(planToSync);
+
+      try {
+        const { commit, reviewPlan } = await syncStructuredPdfPlan(planToSync);
+        setAutoSyncResult(commit);
+
+        if (commit.reviewItems.length > 0) {
+          setStructuredPlan(reviewPlan);
+        } else {
+          setStructuredPlan(planToSync);
+        }
+
+        if (
+          commit.status === 'synced' &&
+          commit.persisted &&
+          commit.activitiesAdded + commit.tasksAdded + commit.notesAdded > 0
+        ) {
+          pushToast({
+            type: commit.reviewItems.length > 0 ? 'warning' : 'success',
+            title: 'Schedule synced successfully',
+            description: `${commit.activitiesAdded} activities added · ${commit.duplicatesSkipped} duplicates skipped${
+              commit.reviewItems.length > 0
+                ? ` · ${commit.reviewItems.length} needing review`
+                : ''
+            }`,
+          });
+        } else if (commit.status === 'duplicates_only') {
+          pushToast({
+            type: 'info',
+            title: 'Already synced',
+            description: `${commit.duplicatesSkipped} duplicate entries skipped.`,
+          });
+        } else if (commit.status === 'needs_review') {
+          pushToast({
+            type: 'warning',
+            title: 'Review required before syncing',
+            description: `${commit.reviewItems.length} entries need confirmation.`,
+          });
+        } else if (commit.status === 'error') {
+          pushToast({
+            type: 'error',
+            title: 'Sync failed',
+            description: commit.error || 'Could not save synced schedule entries.',
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'PDF auto-sync failed.';
+        setAutoSyncResult({
+          status: 'error',
+          persisted: false,
+          error: msg,
+          activitiesAdded: 0,
+          recurringRulesAdded: 0,
+          tasksAdded: 0,
+          notesAdded: 0,
+          duplicatesSkipped: 0,
+          conflictsCount: 0,
+          reviewItems: [],
+          timetableDiff: {
+            hasPreviousImportFromFile: false,
+            addedTitles: [],
+            changedTitles: [],
+            removedTitles: [],
+          },
+        });
+      } finally {
+        setAutoSyncing(false);
+      }
+    },
+    [syncStructuredPdfPlan, pushToast]
+  );
+
+  const handleFilePicked = useCallback(
+    async (file: File | null) => {
+      if (!file) return;
+      if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
+        setPdfError('Please select or paste a valid .pdf file.');
+        return;
+      }
+
+      setSelectedFile(file);
+      setPdfError('');
+      setAiError('');
+      setAutoSyncResult(null);
+      setLastCandidatePlan(null);
+      setPdfExtracting(true);
+      setPdfExtraction(null);
+      setStructuredPlan(null);
+      setExtractedQuotes([]);
+
+      try {
+        const result = await extractPdfPages(file);
+        setPdfExtraction(result);
+        setIncludeMultimodalSnapshots(result.isScannedOrEmpty || result.hasComplexTables);
+
+        const shouldAutoSync = autoSyncRef.current;
+
+        if (result.isScannedOrEmpty) {
+          if (shouldAutoSync) {
+            setPdfExtracting(false);
+            setAiAnalyzing(true);
+            try {
+              const aiPlan = await requestGeminiPlan(result, file, true);
+              setStructuredPlan(aiPlan);
+              setExtractedQuotes(aiPlan.quotations ?? []);
+              await runAutoSync(aiPlan);
+            } catch (err) {
+              setAiError(
+                err instanceof Error
+                  ? err.message
+                  : 'Scanned PDF could not be analyzed automatically.'
+              );
+            } finally {
+              setAiAnalyzing(false);
+            }
+          }
+          return;
+        }
+
+        let activePlan = parsePdfPagesToStructuredPlan(result.fileName, result.pages, {
+          documentHash: result.documentHash,
+          referenceDateISO: todayISO,
+        });
+
+        setStructuredPlan(activePlan);
+        setExtractedQuotes(activePlan.quotations);
+
+        const localScheduleCount =
+          activePlan.weeklyPlans.length +
+          activePlan.dailyPlans.length +
+          activePlan.monthlyGoals.length +
+          activePlan.deadlines.length;
+
+        const totalFound = localScheduleCount + activePlan.quotations.length;
+
+        if (shouldAutoSync) {
+          if (result.hasComplexTables || localScheduleCount === 0) {
+            setAiAnalyzing(true);
+            try {
+              const aiPlan = await requestGeminiPlan(result, file, result.hasComplexTables);
+              activePlan = aiPlan;
+              setStructuredPlan(aiPlan);
+              setExtractedQuotes(aiPlan.quotations ?? []);
+            } catch (err) {
+              // Keep local plan if it has items; report AI fallback error only when 0 items
+              if (localScheduleCount === 0) {
+                setAiError(
+                  err instanceof Error
+                    ? err.message
+                    : 'Unable to reach Gemini analysis endpoint.'
+                );
+              }
+            } finally {
+              setAiAnalyzing(false);
+            }
+          }
+
+          setPdfExtracting(false);
+          await runAutoSync(activePlan);
+          return;
+        }
+
+        if (totalFound === 0) {
+          pushToast({
+            type: 'info',
+            title: 'Text extracted from PDF',
+            description:
+              'No obvious timetable rows matched locally. Click "Enhance with Gemini AI" for table-preserving interpretation.',
+          });
+        }
+      } catch (err) {
+        setPdfError(
+          err instanceof Error
+            ? err.message
+            : 'Could not read this PDF file. Please verify it is not password-protected or corrupted.'
+        );
+      } finally {
+        setPdfExtracting(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    },
+    [todayISO, requestGeminiPlan, runAutoSync, pushToast]
+  );
+
+  // Support clipboard paste of .pdf files when PDF tab is active; reject pasted plain text as non-PDF
+  useEffect(() => {
+    if (activeTab !== 'pdf') return;
+
+    const handleWindowPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isEditable =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+
+      const { pdfFile, hasTextOnly } = extractPdfFileFromClipboard(e.clipboardData);
+
+      if (pdfFile) {
+        e.preventDefault();
+        void handleFilePicked(pdfFile);
+        return;
+      }
+
+      if (!isEditable && hasTextOnly) {
+        e.preventDefault();
+        setPdfError(
+          'Pasted text is not a PDF file. Paste or upload a .pdf file to import a schedule.'
+        );
+      }
+    };
+
+    window.addEventListener('paste', handleWindowPaste);
+    return () => window.removeEventListener('paste', handleWindowPaste);
+  }, [activeTab, handleFilePicked]);
+
+  const handleDropzonePaste = (e: React.ClipboardEvent<HTMLElement>) => {
+    const { pdfFile, hasTextOnly } = extractPdfFileFromClipboard(e.clipboardData);
+    if (pdfFile) {
+      e.preventDefault();
+      e.stopPropagation();
+      void handleFilePicked(pdfFile);
+      return;
+    }
+    if (hasTextOnly) {
+      e.preventDefault();
+      e.stopPropagation();
+      setPdfError(
+        'Pasted text is not a PDF file. Paste or upload a .pdf file to import a schedule.'
+      );
+    }
+  };
+
+  const handleAnalyzeWithGemini = async (forceMultimodal = false) => {
+    if (!pdfExtraction) return;
+    setAiAnalyzing(true);
+    setAiError('');
+
+    try {
+      const data = await requestGeminiPlan(pdfExtraction, selectedFile, forceMultimodal);
       setStructuredPlan(data);
       setExtractedQuotes(data.quotations ?? []);
+
+      if (autoSyncEnabled) {
+        await runAutoSync(data);
+        return;
+      }
 
       const totalItems =
         (data.weeklyPlans?.length ?? 0) +
@@ -409,7 +653,7 @@ export const CaptureView: React.FC = () => {
                 : 'text-[var(--df-text-muted)] hover:text-[var(--df-text)]'
             }`}
           >
-            <FileUp className="h-3.5 w-3.5" />
+            <BiIcon name="file-earmark-arrow-up" className="text-sm" />
             PDF to Schedule
           </button>
           <button
@@ -421,7 +665,7 @@ export const CaptureView: React.FC = () => {
                 : 'text-[var(--df-text-muted)] hover:text-[var(--df-text)]'
             }`}
           >
-            <NotebookPen className="h-3.5 w-3.5" />
+            <BiIcon name="journal-text" className="text-sm" />
             Notes &amp; Quotes ({state.notes.length + state.quotations.length})
           </button>
         </div>
@@ -430,8 +674,45 @@ export const CaptureView: React.FC = () => {
       {/* SECTION A: PDF TO SCHEDULE */}
       {activeTab === 'pdf' && (
         <div className="space-y-6">
-          {/* Upload Dropzone */}
+          {/* Auto-Sync Preference Strip */}
+          <div className="flex flex-col justify-between gap-3 rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface)] px-4 py-3 sm:flex-row sm:items-center">
+            <label
+              htmlFor="capture-auto-sync-toggle"
+              className="flex cursor-pointer items-center gap-2.5 text-xs"
+            >
+              <input
+                id="capture-auto-sync-toggle"
+                type="checkbox"
+                checked={autoSyncEnabled}
+                onChange={(e) => updateSettings({ autoSyncPdfSchedule: e.target.checked })}
+                className="h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+              />
+              <span>
+                <span className="font-semibold text-[var(--df-text)]">
+                  Automatically sync imported PDF schedules
+                </span>
+                <span className="block text-[11px] text-[var(--df-text-muted)]">
+                  Auto-syncs validated activities &amp; deadlines on upload or paste; sends conflicts or undated rows to review.
+                </span>
+              </span>
+            </label>
+
+            {structuredPlan && !autoSyncing && (
+              <button
+                type="button"
+                onClick={() => void runAutoSync(structuredPlan)}
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-3 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)] whitespace-nowrap"
+              >
+                <BiIcon name="arrow-repeat" className="text-xs" />
+                Sync to calendar
+              </button>
+            )}
+          </div>
+
+          {/* Upload Dropzone + Clipboard PDF Paste */}
           <section
+            tabIndex={0}
+            onPaste={handleDropzonePaste}
             onDragOver={(e) => {
               e.preventDefault();
               setIsDraggingPdf(true);
@@ -442,7 +723,7 @@ export const CaptureView: React.FC = () => {
               setIsDraggingPdf(false);
               handleFilePicked(e.dataTransfer.files?.[0] ?? null);
             }}
-            className={`rounded-3xl border border-dashed p-6 text-center transition-colors ${
+            className={`rounded-3xl border border-dashed p-6 text-center transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--df-accent)] ${
               isDraggingPdf
                 ? 'border-[var(--df-accent)] bg-[var(--df-accent-soft)]'
                 : 'border-[var(--df-border-strong)] bg-[var(--df-surface)]'
@@ -457,23 +738,29 @@ export const CaptureView: React.FC = () => {
             />
             <div className="mx-auto flex max-w-md flex-col items-center">
               <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--df-accent-soft)] text-[var(--df-accent-soft-fg)]">
-                <FileText className="h-5 w-5" />
+                <BiIcon name="file-earmark-text" className="text-xl" />
               </div>
               <h2 className="mt-3 font-display text-lg font-bold text-[var(--df-text)]">
-                Upload a syllabus, timetable, or plan
+                Upload or paste a timetable PDF
               </h2>
               <p className="mt-1 text-xs leading-relaxed text-[var(--df-text-muted)]">
-                Reads selectable text locally in your browser first—dates, times, tasks, and key quotations stay private on your device.
+                Drop, choose, or paste a <span className="font-mono">.pdf</span> file from your clipboard. Local extraction runs first on your device.
               </p>
 
               <button
                 type="button"
-                disabled={pdfExtracting}
+                disabled={pdfExtracting || autoSyncing}
                 onClick={() => fileInputRef.current?.click()}
                 className="mt-4 inline-flex min-h-[44px] items-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 text-sm font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 active:scale-[0.98] disabled:opacity-60"
               >
-                <FileUp className="h-4 w-4" />
-                {pdfExtracting ? 'Reading PDF...' : 'Choose PDF file'}
+                <BiIcon name="file-earmark-arrow-up" className="text-base" />
+                {pdfExtracting
+                  ? 'Reading PDF...'
+                  : aiAnalyzing
+                  ? 'Analyzing schedule...'
+                  : autoSyncing
+                  ? 'Syncing schedule...'
+                  : 'Choose PDF file'}
               </button>
 
               {pdfError && (
@@ -484,6 +771,172 @@ export const CaptureView: React.FC = () => {
             </div>
           </section>
 
+          {/* Auto-Sync Progress & Honest Persistence Status */}
+          {autoSyncing && (
+            <section
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-3 rounded-2xl border border-[var(--df-accent-border)] bg-[var(--df-accent-soft)] px-4 py-3 text-xs font-medium text-[var(--df-accent-soft-fg)]"
+            >
+              <BiIcon name="arrow-repeat" spin className="text-sm" />
+              <span>Validating dates, detecting overlaps &amp; saving schedule to your calendar...</span>
+            </section>
+          )}
+
+          {autoSyncResult && !autoSyncing && (
+            <section
+              role={autoSyncResult.status === 'error' ? 'alert' : 'status'}
+              className={`space-y-3 rounded-3xl border p-5 ${
+                autoSyncResult.status === 'error'
+                  ? 'border-rose-300 bg-rose-50/70 dark:border-rose-900/50 dark:bg-rose-950/25'
+                  : autoSyncResult.status === 'synced'
+                  ? 'border-[var(--df-accent-border)] bg-[var(--df-accent-soft)]/50'
+                  : 'border-amber-300 bg-amber-50/60 dark:border-amber-900/50 dark:bg-amber-950/25'
+              }`}
+            >
+              <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                <div className="flex items-start gap-2.5">
+                  <BiIcon
+                    name={
+                      autoSyncResult.status === 'synced'
+                        ? 'check-circle-fill'
+                        : autoSyncResult.status === 'error'
+                        ? 'exclamation-circle-fill'
+                        : 'exclamation-triangle-fill'
+                    }
+                    className={`mt-0.5 text-base shrink-0 ${
+                      autoSyncResult.status === 'synced'
+                        ? 'text-[var(--df-accent-soft-fg)]'
+                        : autoSyncResult.status === 'error'
+                        ? 'text-rose-600 dark:text-rose-400'
+                        : 'text-amber-600 dark:text-amber-400'
+                    }`}
+                  />
+                  <div>
+                    <h3 className="text-sm font-bold text-[var(--df-text)]">
+                      {autoSyncResult.status === 'synced' && autoSyncResult.persisted
+                        ? 'Schedule synced successfully'
+                        : autoSyncResult.status === 'duplicates_only'
+                        ? 'Already synced — duplicates skipped'
+                        : autoSyncResult.status === 'needs_review'
+                        ? 'Entries require your review before adding'
+                        : autoSyncResult.status === 'empty'
+                        ? 'No schedule activities found in this PDF'
+                        : 'Could not sync PDF schedule'}
+                    </h3>
+                    {autoSyncResult.status === 'error' && autoSyncResult.error && (
+                      <p className="mt-0.5 text-xs text-rose-700 dark:text-rose-300">
+                        {autoSyncResult.error}
+                      </p>
+                    )}
+                    {autoSyncResult.status !== 'error' && (
+                      <p className="mt-1 text-xs text-[var(--df-text-muted)]">
+                        <span className="font-mono font-semibold text-[var(--df-text)]">
+                          {autoSyncResult.activitiesAdded}
+                        </span>{' '}
+                        activities added ·{' '}
+                        {autoSyncResult.tasksAdded > 0 && (
+                          <>
+                            <span className="font-mono font-semibold text-[var(--df-text)]">
+                              {autoSyncResult.tasksAdded}
+                            </span>{' '}
+                            deadlines added ·{' '}
+                          </>
+                        )}
+                        {autoSyncResult.notesAdded > 0 && (
+                          <>
+                            <span className="font-mono font-semibold text-[var(--df-text)]">
+                              {autoSyncResult.notesAdded}
+                            </span>{' '}
+                            roadmaps saved ·{' '}
+                          </>
+                        )}
+                        <span className="font-mono font-semibold text-[var(--df-text)]">
+                          {autoSyncResult.duplicatesSkipped}
+                        </span>{' '}
+                        duplicates skipped ·{' '}
+                        <span className="font-mono font-semibold text-[var(--df-text)]">
+                          {autoSyncResult.reviewItems.length}
+                        </span>{' '}
+                        entries requiring review
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {autoSyncResult.status === 'error' && lastCandidatePlan && (
+                    <button
+                      type="button"
+                      onClick={() => void runAutoSync(lastCandidatePlan)}
+                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-[var(--df-cta)] px-3.5 text-xs font-semibold text-[var(--df-cta-fg)]"
+                    >
+                      <BiIcon name="arrow-clockwise" className="text-xs" />
+                      Retry Sync
+                    </button>
+                  )}
+                  {(autoSyncResult.status === 'synced' ||
+                    autoSyncResult.status === 'duplicates_only') && (
+                    <button
+                      type="button"
+                      onClick={() => setActivePage('calendar')}
+                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-3.5 text-xs font-semibold text-[var(--df-accent-fg)]"
+                    >
+                      <BiIcon name="calendar3" className="text-xs" />
+                      View Calendar
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {autoSyncResult.reviewItems.length > 0 && (
+                <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface)] p-3.5">
+                  <p className="text-xs font-semibold text-[var(--df-text)]">
+                    Entries requiring review (kept out of your calendar until confirmed below):
+                  </p>
+                  <ul className="mt-2 space-y-1.5 text-xs text-[var(--df-text-muted)]">
+                    {autoSyncResult.reviewItems.slice(0, 6).map((item) => (
+                      <li key={item.id} className="flex items-start gap-2">
+                        <BiIcon name="dot" className="mt-0.5 text-sm text-amber-500" />
+                        <span>
+                          <span className="font-semibold text-[var(--df-text)]">{item.title}</span> —{' '}
+                          {item.reason}
+                        </span>
+                      </li>
+                    ))}
+                    {autoSyncResult.reviewItems.length > 6 && (
+                      <li className="pl-5 text-[11px] text-[var(--df-text-subtle)]">
+                        +{autoSyncResult.reviewItems.length - 6} more checked in Smart Schedule Review below.
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              )}
+
+              {autoSyncResult.timetableDiff.hasPreviousImportFromFile &&
+                (autoSyncResult.timetableDiff.changedTitles.length > 0 ||
+                  autoSyncResult.timetableDiff.removedTitles.length > 0) && (
+                  <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface)] p-3.5 text-xs text-[var(--df-text-muted)]">
+                    <p className="font-semibold text-[var(--df-text)]">
+                      Updated timetable comparison (existing calendar blocks preserved):
+                    </p>
+                    {autoSyncResult.timetableDiff.changedTitles.length > 0 && (
+                      <p className="mt-1">
+                        Changed times routed for review:{' '}
+                        {autoSyncResult.timetableDiff.changedTitles.join('; ')}
+                      </p>
+                    )}
+                    {autoSyncResult.timetableDiff.removedTitles.length > 0 && (
+                      <p className="mt-1">
+                        Not in updated PDF (kept in calendar):{' '}
+                        {autoSyncResult.timetableDiff.removedTitles.join(', ')}
+                      </p>
+                    )}
+                  </div>
+                )}
+            </section>
+          )}
+
           {/* Scanned PDF Honest OCR Warning + Multimodal Consent Option */}
           {pdfExtraction && pdfExtraction.isScannedOrEmpty && !structuredPlan && (
             <section
@@ -492,7 +945,10 @@ export const CaptureView: React.FC = () => {
             >
               <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
                 <div className="flex items-start gap-3">
-                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <BiIcon
+                    name="exclamation-triangle"
+                    className="mt-0.5 text-lg shrink-0 text-amber-600 dark:text-amber-400"
+                  />
                   <div className="space-y-1">
                     <h3 className="text-sm font-semibold text-[var(--df-text)]">
                       Scanned or image-based PDF: {pdfExtraction.fileName}
@@ -506,10 +962,10 @@ export const CaptureView: React.FC = () => {
                 <button
                   type="button"
                   disabled={aiAnalyzing}
-                  onClick={() => handleAnalyzeWithGemini(true)}
+                  onClick={() => void handleAnalyzeWithGemini(true)}
                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-cta)] px-4 text-xs font-semibold text-[var(--df-cta-fg)] hover:opacity-90 disabled:opacity-60 whitespace-nowrap shrink-0"
                 >
-                  <Sparkles className="h-3.5 w-3.5" />
+                  <BiIcon name="stars" className="text-xs" />
                   {aiAnalyzing ? 'Reading pages...' : 'Read with Gemini Multimodal'}
                 </button>
               </div>
@@ -546,20 +1002,20 @@ export const CaptureView: React.FC = () => {
 
                   <button
                     type="button"
-                    disabled={aiAnalyzing}
-                    onClick={() => handleAnalyzeWithGemini(false)}
+                    disabled={aiAnalyzing || autoSyncing}
+                    onClick={() => void handleAnalyzeWithGemini(false)}
                     className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-xs font-semibold text-[var(--df-text)] transition-colors hover:border-[var(--df-border-strong)] disabled:opacity-60 whitespace-nowrap shrink-0"
                   >
-                    <Sparkles className="h-3.5 w-3.5" />
+                    <BiIcon name="stars" className="text-xs" />
                     {aiAnalyzing ? 'Analyzing...' : 'Enhance with Gemini AI'}
                   </button>
                 </div>
 
                 <div className="mt-3 flex flex-col justify-between gap-2.5 rounded-2xl bg-[var(--df-bg)] px-3.5 py-2.5 sm:flex-row sm:items-center">
                   <p className="text-[11px] leading-relaxed text-[var(--df-text-muted)]">
-                    Privacy notice: Nothing leaves your device automatically. Clicking{' '}
+                    Privacy notice: Local extraction runs on-device first. Gemini AI is invoked only when you click{' '}
                     <span className="font-semibold text-[var(--df-text)]">Enhance with Gemini AI</span>{' '}
-                    sends structured text (plus page snapshots if checked) to our server-side Gemini endpoint.
+                    or when auto-sync encounters complex/scanned PDF tables.
                   </p>
                   <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-[var(--df-text)] shrink-0">
                     <input
@@ -638,7 +1094,7 @@ export const CaptureView: React.FC = () => {
                               onClick={() => handleSaveExtractedQuote(q)}
                               className="inline-flex h-8 items-center gap-1 rounded-lg border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)] disabled:opacity-50"
                             >
-                              <Quote className="h-3 w-3" />
+                              <BiIcon name="quote" className="text-xs" />
                               {q.saved ? 'Saved' : 'Save quote'}
                             </button>
                             <button
@@ -646,7 +1102,7 @@ export const CaptureView: React.FC = () => {
                               onClick={() => handleSaveExtractedQuoteAsNote(q)}
                               className="inline-flex h-8 items-center gap-1 rounded-lg border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)]"
                             >
-                              <NotebookPen className="h-3 w-3" />
+                              <BiIcon name="journal-text" className="text-xs" />
                               To note
                             </button>
                             <button
@@ -660,7 +1116,7 @@ export const CaptureView: React.FC = () => {
                               }
                               className="inline-flex h-8 items-center gap-1 rounded-lg bg-[var(--df-accent)] px-2.5 text-xs font-semibold text-[var(--df-accent-fg)]"
                             >
-                              <CalendarPlus className="h-3 w-3" />
+                              <BiIcon name="calendar-plus" className="text-xs" />
                               Schedule study
                             </button>
                           </div>
@@ -776,7 +1232,10 @@ export const CaptureView: React.FC = () => {
           {/* Searchable Notes & Quotations Feed */}
           <div className="space-y-5 lg:col-span-7">
             <div className="relative">
-              <Search className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-[var(--df-text-subtle)]" />
+              <BiIcon
+                name="search"
+                className="pointer-events-none absolute top-1/2 left-3.5 -translate-y-1/2 text-sm text-[var(--df-text-subtle)]"
+              />
               <input
                 type="search"
                 value={searchQuery}
@@ -830,7 +1289,7 @@ export const CaptureView: React.FC = () => {
                           aria-label={`Delete ${note.title || 'note'}`}
                           className="rounded-lg p-1.5 text-[var(--df-text-subtle)] hover:text-rose-600"
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          <BiIcon name="trash3" className="text-xs" />
                         </button>
                       </div>
                     </div>
@@ -874,7 +1333,7 @@ export const CaptureView: React.FC = () => {
                           }
                           className="inline-flex h-8 items-center gap-1 rounded-lg bg-[var(--df-accent-soft)] px-2.5 text-xs font-semibold text-[var(--df-accent-soft-fg)]"
                         >
-                          <CalendarPlus className="h-3 w-3" />
+                          <BiIcon name="calendar-plus" className="text-xs" />
                           Schedule review
                         </button>
                         <button
@@ -883,7 +1342,7 @@ export const CaptureView: React.FC = () => {
                           aria-label="Delete quotation"
                           className="rounded-lg p-1.5 text-[var(--df-text-subtle)] hover:text-rose-600"
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          <BiIcon name="trash3" className="text-xs" />
                         </button>
                       </div>
                     </div>

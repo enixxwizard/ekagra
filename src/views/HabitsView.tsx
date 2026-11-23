@@ -10,17 +10,8 @@ import {
   startOfWeek,
   subMonths,
 } from 'date-fns';
-import {
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Flame,
-  Pencil,
-  Plus,
-  Trash2,
-  Trophy,
-} from 'lucide-react';
 import { HabitModal } from '../components/modals/HabitModal';
+import { BiIcon } from '../components/ui/BiIcon';
 import { useDayFlow } from '../context/DayFlowContext';
 import { HabitItem } from '../types/dayflow';
 import { ACTIVITY_COLORS } from '../utils/colors';
@@ -81,7 +72,7 @@ export const HabitsView: React.FC = () => {
           }}
           className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-[var(--df-cta)] px-3.5 text-xs font-semibold text-[var(--df-cta-fg)] whitespace-nowrap shrink-0"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <BiIcon name="plus-lg" className="text-xs" />
           New habit
         </button>
       </div>
@@ -100,7 +91,7 @@ export const HabitsView: React.FC = () => {
             }}
             className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 py-2 text-xs font-semibold text-[var(--df-accent-fg)]"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <BiIcon name="plus-lg" className="text-xs" />
             Create habit
           </button>
         </div>
@@ -138,7 +129,7 @@ export const HabitsView: React.FC = () => {
                             : 'border-[var(--df-border)] bg-[var(--df-bg)] text-transparent hover:border-[var(--df-border-strong)]'
                         }`}
                       >
-                        <Check className="h-4 w-4 stroke-[2.5]" />
+                        <BiIcon name="check-lg" className="text-sm font-bold" />
                       </button>
 
                       <div className="min-w-0">
@@ -167,7 +158,7 @@ export const HabitsView: React.FC = () => {
                         aria-label={`Edit ${habit.title}`}
                         className="rounded-lg p-1.5 text-[var(--df-text-subtle)] hover:text-[var(--df-text)]"
                       >
-                        <Pencil className="h-3.5 w-3.5" />
+                        <BiIcon name="pencil" className="text-xs" />
                       </button>
                       <button
                         type="button"
@@ -179,7 +170,7 @@ export const HabitsView: React.FC = () => {
                         aria-label={`Delete ${habit.title}`}
                         className="rounded-lg p-1.5 text-[var(--df-text-subtle)] hover:text-rose-600"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <BiIcon name="trash3" className="text-xs" />
                       </button>
                     </div>
                   </div>
@@ -188,7 +179,7 @@ export const HabitsView: React.FC = () => {
                     <div>
                       <span className="block text-[11px] text-[var(--df-text-muted)]">Streak</span>
                       <span className="mt-0.5 inline-flex items-center gap-1 font-mono font-semibold tabular-nums text-[var(--df-text)]">
-                        <Flame className="h-3.5 w-3.5 text-amber-500" />
+                        <BiIcon name="fire" className="text-xs text-amber-500" />
                         {stats.currentStreak}
                         {habit.frequency === 'daily' ? 'd' : 'w'}
                       </span>
@@ -196,7 +187,7 @@ export const HabitsView: React.FC = () => {
                     <div>
                       <span className="block text-[11px] text-[var(--df-text-muted)]">Best</span>
                       <span className="mt-0.5 inline-flex items-center gap-1 font-mono font-semibold tabular-nums text-[var(--df-text)]">
-                        <Trophy className="h-3.5 w-3.5 text-[var(--df-accent-soft-fg)]" />
+                        <BiIcon name="trophy" className="text-xs text-[var(--df-accent-soft-fg)]" />
                         {stats.longestStreak}
                         {habit.frequency === 'daily' ? 'd' : 'w'}
                       </span>
@@ -236,7 +227,7 @@ export const HabitsView: React.FC = () => {
                     aria-label="Previous month"
                     className="rounded-xl border border-[var(--df-border)] p-1.5 text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
                   >
-                    <ChevronLeft className="h-4 w-4" />
+                    <BiIcon name="chevron-left" className="text-sm" />
                   </button>
                   <span className="min-w-[108px] text-center text-xs font-semibold text-[var(--df-text)]">
                     {format(calendarMonth, 'MMMM yyyy')}
@@ -247,7 +238,7 @@ export const HabitsView: React.FC = () => {
                     aria-label="Next month"
                     className="rounded-xl border border-[var(--df-border)] p-1.5 text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
                   >
-                    <ChevronRight className="h-4 w-4" />
+                    <BiIcon name="chevron-right" className="text-sm" />
                   </button>
                 </div>
               </div>

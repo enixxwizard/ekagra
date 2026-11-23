@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   addMonths,
   eachDayOfInterval,
@@ -11,20 +11,7 @@ import {
   startOfWeek,
   subMonths,
 } from 'date-fns';
-import {
-  AlertTriangle,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Clock,
-  Coffee,
-  Play,
-  Plus,
-  Repeat,
-  SkipForward,
-  Sparkles,
-  Wand2,
-} from 'lucide-react';
+import { BiIcon } from '../components/ui/BiIcon';
 import { RecurringScopeModal } from '../components/modals/RecurringScopeModal';
 import { useDayFlow } from '../context/DayFlowContext';
 import { ResolvedActivity } from '../types/dayflow';
@@ -83,6 +70,8 @@ export const CalendarView: React.FC = () => {
     toggleTask,
     openQuickActivitySheet,
     pushToast,
+    calendarFocusTarget,
+    consumeCalendarFocusTarget,
   } = useDayFlow();
 
   const todayISO = getTodayISO();
@@ -94,6 +83,7 @@ export const CalendarView: React.FC = () => {
   const [selectedDate, setSelectedDate] = useState(todayISO);
   const [currentMonth, setCurrentMonth] = useState<Date>(() => startOfMonth(new Date()));
   const [showSmartAssist, setShowSmartAssist] = useState(false);
+  const [highlightedActivityId, setHighlightedActivityId] = useState<string | null>(null);
 
   const [dragSession, setDragSession] = useState<DragSession | null>(null);
   const [pendingDragCommit, setPendingDragCommit] = useState<{
@@ -103,6 +93,32 @@ export const CalendarView: React.FC = () => {
   } | null>(null);
 
   const dragMovedRef = useRef(false);
+
+  useEffect(() => {
+    if (!calendarFocusTarget) return;
+    setMode('day');
+    setSelectedDate(calendarFocusTarget.date);
+    setHighlightedActivityId(calendarFocusTarget.activityId);
+    consumeCalendarFocusTarget();
+
+    const scrollTimer = window.setTimeout(() => {
+      const el = document.querySelector<HTMLElement>(
+        `[data-activity-id="${CSS.escape(calendarFocusTarget.activityId)}"]`
+      );
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+
+    const clearTimer = window.setTimeout(() => {
+      setHighlightedActivityId((curr) =>
+        curr === calendarFocusTarget.activityId ? null : curr
+      );
+    }, 4000);
+
+    return () => {
+      window.clearTimeout(scrollTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [calendarFocusTarget, consumeCalendarFocusTarget]);
 
   const dayActivities = useMemo(
     () => resolveActivitiesForDate(state.activities, selectedDate),
@@ -337,7 +353,7 @@ export const CalendarView: React.FC = () => {
               aria-label="Previous"
               className="flex h-10 w-10 items-center justify-center rounded-l-xl text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
             >
-              <ChevronLeft className="h-4 w-4" />
+              <BiIcon name="chevron-left" className="text-[15px]" />
             </button>
             <button
               type="button"
@@ -361,7 +377,7 @@ export const CalendarView: React.FC = () => {
               aria-label="Next"
               className="flex h-10 w-10 items-center justify-center rounded-r-xl text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
             >
-              <ChevronRight className="h-4 w-4" />
+              <BiIcon name="chevron-right" className="text-[15px]" />
             </button>
           </div>
 
@@ -401,7 +417,7 @@ export const CalendarView: React.FC = () => {
                 : 'border-[var(--df-border)] bg-[var(--df-surface)] text-[var(--df-text)] hover:border-[var(--df-border-strong)]'
             }`}
           >
-            <Sparkles className="h-3.5 w-3.5" />
+            <BiIcon name="stars" className="text-[14px]" />
             Smart fit
           </button>
         </div>
@@ -412,7 +428,7 @@ export const CalendarView: React.FC = () => {
         <div className="space-y-2">
           {dayLoad.conflicts.length > 0 && (
             <div className="flex items-start gap-2.5 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 dark:border-amber-800/70 dark:bg-amber-950/35 dark:text-amber-200">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              <BiIcon name="exclamation-triangle" className="mt-0.5 text-[15px] shrink-0 text-amber-600" />
               <div>
                 <span className="font-semibold">Overlap:</span>{' '}
                 {dayLoad.conflicts
@@ -423,7 +439,7 @@ export const CalendarView: React.FC = () => {
           )}
           {dayLoad.isOverloaded && (
             <div className="flex items-start gap-2.5 rounded-2xl border border-rose-300 bg-rose-50 px-4 py-3 text-xs text-rose-950 dark:border-rose-800/70 dark:bg-rose-950/35 dark:text-rose-200">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+              <BiIcon name="exclamation-triangle" className="mt-0.5 text-[15px] shrink-0 text-rose-600" />
               <div>
                 <span className="font-semibold">Heavy day:</span>{' '}
                 {formatHoursDecimal(dayLoad.plannedMinutes)} scheduled (capacity{' '}
@@ -520,6 +536,7 @@ export const CalendarView: React.FC = () => {
                       return (
                         <div
                           key={activity.instanceId}
+                          data-activity-id={activity.activityId}
                           onPointerDown={(e) => handlePointerDownBlock(e, activity, 'move')}
                           onClick={() => {
                             if (dragMovedRef.current) return;
@@ -534,7 +551,9 @@ export const CalendarView: React.FC = () => {
                           className={`group absolute z-10 flex cursor-grab flex-col justify-between overflow-hidden rounded-2xl border px-3 py-1.5 active:cursor-grabbing ${
                             token.blockBg
                           } ${
-                            hasConflict
+                            highlightedActivityId === activity.activityId
+                              ? 'ring-2 ring-[var(--df-accent)] border-[var(--df-accent)]'
+                              : hasConflict
                               ? 'border-amber-500 ring-1 ring-amber-400/60'
                               : token.blockBorder
                           } ${isDraggingThis ? 'z-30 opacity-95' : ''} ${
@@ -553,7 +572,7 @@ export const CalendarView: React.FC = () => {
                                   {activity.title}
                                 </p>
                                 {activity.isRecurring && (
-                                  <Repeat className="h-3 w-3 shrink-0 text-[var(--df-text-muted)]" />
+                                  <BiIcon name="repeat" className="text-[12px] shrink-0 text-[var(--df-text-muted)]" />
                                 )}
                               </div>
                               <p className="mt-0.5 truncate font-mono text-[11px] tabular-nums text-[var(--df-text-muted)]">
@@ -576,7 +595,7 @@ export const CalendarView: React.FC = () => {
                                 }}
                                 className="rounded-lg bg-[var(--df-surface)] p-1 text-[var(--df-text)]"
                               >
-                                <Check className="h-3 w-3" />
+                                <BiIcon name="check-lg" className="text-[12px]" />
                               </button>
                               <button
                                 type="button"
@@ -591,7 +610,7 @@ export const CalendarView: React.FC = () => {
                                 }}
                                 className="rounded-lg bg-[var(--df-surface)] p-1 text-[var(--df-text)]"
                               >
-                                <SkipForward className="h-3 w-3" />
+                                <BiIcon name="skip-forward" className="text-[12px]" />
                               </button>
                               <button
                                 type="button"
@@ -602,7 +621,7 @@ export const CalendarView: React.FC = () => {
                                 }}
                                 className="rounded-lg bg-[var(--df-accent)] p-1 text-[var(--df-accent-fg)]"
                               >
-                                <Play className="h-3 w-3" />
+                                <BiIcon name="play-fill" className="text-[12px]" />
                               </button>
                             </div>
                           </div>
@@ -793,7 +812,7 @@ export const CalendarView: React.FC = () => {
                     onClick={() => openQuickActivitySheet({ initialDate: selectedDate })}
                     className="inline-flex h-9 items-center gap-1 rounded-xl bg-[var(--df-cta)] px-3 text-xs font-semibold text-[var(--df-cta-fg)]"
                   >
-                    <Plus className="h-3.5 w-3.5" /> Add
+                    <BiIcon name="plus-lg" className="text-[13px]" /> Add
                   </button>
                 </div>
 
@@ -847,7 +866,7 @@ export const CalendarView: React.FC = () => {
             <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-4">
               <div className="flex items-center justify-between border-b border-[var(--df-border)] pb-3">
                 <div className="flex items-center gap-2">
-                  <Clock className="h-4 w-4 text-[var(--df-accent-soft-fg)]" />
+                  <BiIcon name="clock" className="text-[15px] text-[var(--df-accent-soft-fg)]" />
                   <h3 className="text-sm font-semibold text-[var(--df-text)]">Open slots</h3>
                 </div>
                 <span className="text-xs text-[var(--df-text-muted)]">{format(parseISO(selectedDate), 'MMM d')}</span>
@@ -896,7 +915,7 @@ export const CalendarView: React.FC = () => {
 
             <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-4">
               <div className="flex items-center gap-2 border-b border-[var(--df-border)] pb-3">
-                <Coffee className="h-4 w-4 text-[var(--df-accent-soft-fg)]" />
+                <BiIcon name="cup-hot" className="text-[15px] text-[var(--df-accent-soft-fg)]" />
                 <h3 className="text-sm font-semibold text-[var(--df-text)]">Pacing check</h3>
               </div>
               {dayLoad.breakSuggestions.length === 0 ? (
@@ -937,7 +956,7 @@ export const CalendarView: React.FC = () => {
                     onClick={handleAutoDistributeTasks}
                     className="inline-flex items-center gap-1 rounded-xl bg-[var(--df-cta)] px-2.5 py-1 text-[11px] font-semibold text-[var(--df-cta-fg)]"
                   >
-                    <Wand2 className="h-3 w-3" />
+                    <BiIcon name="magic" className="text-[12px]" />
                     Auto-fit ({unscheduledTasks.length})
                   </button>
                 )}

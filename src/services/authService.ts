@@ -95,7 +95,7 @@ export function mapAuthError(err: unknown, fallback = 'Authentication failed. Pl
     return 'Google sign-in was cancelled. You can try again or continue as a guest.';
   }
   if (lower.includes('popup') && lower.includes('blocked')) {
-    return 'Sign-in popup was blocked by your browser. Allow popups for this site or open DayFlow in a new tab.';
+    return 'Sign-in popup was blocked by your browser. Allow popups for this site or open Ekagra in a new tab.';
   }
   if (
     lower.includes('otp_expired') ||
@@ -385,7 +385,7 @@ export const authService = {
 
       if (!popupWindow) {
         throw new Error(
-          'Sign-in popup was blocked by your browser. Allow popups for this site or open DayFlow in a new tab.'
+          'Sign-in popup was blocked by your browser. Allow popups for this site or open Ekagra in a new tab.'
         );
       }
 

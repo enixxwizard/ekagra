@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, ArrowLeft, Loader2 } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 import { authService } from '../../services/authService';
+import { BiIcon } from '../ui/BiIcon';
+import { EkagraMark } from '../ui/EkagraBrand';
 
 interface AuthCallbackProps {
   onSuccess: () => void;
@@ -32,7 +33,7 @@ export const AuthCallback: React.FC<AuthCallbackProps> = ({
             },
             '*'
           );
-          setStatusMessage('Sign-in verified. Returning to DayFlow...');
+          setStatusMessage('Sign-in verified. Returning to Ekagra...');
           window.setTimeout(() => {
             window.close();
           }, 350);
@@ -76,14 +77,14 @@ export const AuthCallback: React.FC<AuthCallbackProps> = ({
   return (
     <div className="flex min-h-screen items-center justify-center bg-[var(--df-bg)] px-4 text-[var(--df-text)]">
       <div className="w-full max-w-md rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-7 text-center">
-        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--df-accent)] font-display text-sm font-bold text-[var(--df-accent-fg)]">
-          df
+        <div className="flex justify-center">
+          <EkagraMark size="lg" />
         </div>
 
         {errorMessage ? (
           <div className="mt-5 space-y-4">
             <div className="flex items-center justify-center gap-2 text-rose-600 dark:text-rose-400">
-              <AlertTriangle className="h-5 w-5 shrink-0" />
+              <BiIcon name="exclamation-triangle" className="text-base shrink-0" />
               <h1 className="font-display text-lg font-bold">Verification incomplete</h1>
             </div>
             <p className="text-sm leading-relaxed text-[var(--df-text-muted)]">
@@ -94,14 +95,14 @@ export const AuthCallback: React.FC<AuthCallbackProps> = ({
               onClick={() => onBackToSignIn(errorMessage)}
               className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-2xl bg-[var(--df-cta)] px-5 text-sm font-semibold text-[var(--df-cta-fg)] transition-opacity hover:opacity-90"
             >
-              <ArrowLeft className="h-4 w-4" />
+              <BiIcon name="arrow-left" className="text-sm" />
               Back to sign in
             </button>
           </div>
         ) : (
           <div className="mt-5 space-y-3">
             <div className="flex items-center justify-center gap-2 text-[var(--df-text)]">
-              <Loader2 className="h-5 w-5 animate-spin" />
+              <BiIcon name="arrow-repeat" spin className="text-base" />
               <h1 className="font-display text-lg font-bold">Completing verification</h1>
             </div>
             <p className="text-sm text-[var(--df-text-muted)]">{statusMessage}</p>

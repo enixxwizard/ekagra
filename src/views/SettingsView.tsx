@@ -1,16 +1,5 @@
 import React, { useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  Bell,
-  Check,
-  Cloud,
-  Download,
-  HardDrive,
-  LogIn,
-  Palette,
-  Trash2,
-  Upload,
-} from 'lucide-react';
+import { BiIcon } from '../components/ui/BiIcon';
 import { useDayFlow } from '../context/DayFlowContext';
 import { useAuth } from '../hooks/useAuth';
 import { TimeFormat, WeekStartDay } from '../types/dayflow';
@@ -51,7 +40,7 @@ export const SettingsView: React.FC = () => {
       pushToast({
         type: 'success',
         title: 'Reminders enabled',
-        description: 'You will get browser alerts while DayFlow is open.',
+        description: 'You will get browser alerts while Ekagra is open.',
       });
     } else if (result === 'denied') {
       updateSettings({ notificationsEnabled: false });
@@ -104,7 +93,7 @@ export const SettingsView: React.FC = () => {
           type: 'error',
           title: 'Import failed',
           description:
-            err instanceof Error ? err.message : 'Invalid DayFlow backup file.',
+            err instanceof Error ? err.message : 'Invalid Ekagra backup file.',
         });
       } finally {
         if (fileInputRef.current) fileInputRef.current.value = '';
@@ -119,7 +108,7 @@ export const SettingsView: React.FC = () => {
     pushToast({
       type: 'info',
       title: 'Data cleared',
-      description: 'DayFlow has been reset.',
+      description: 'Ekagra has been reset.',
     });
   };
 
@@ -130,14 +119,14 @@ export const SettingsView: React.FC = () => {
           Settings
         </h1>
         <p className="mt-0.5 text-xs text-[var(--df-text-muted)]">
-          Make DayFlow feel like yours.
+          Make Ekagra feel like yours.
         </p>
       </div>
 
       {/* Theme Selector */}
       <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">
         <div className="flex items-center gap-2 border-b border-[var(--df-border)] pb-3">
-          <Palette className="h-4 w-4 text-[var(--df-text)]" />
+          <BiIcon name="palette" className="text-sm text-[var(--df-text)]" />
           <h2 className="text-sm font-semibold text-[var(--df-text)]">
             Theme
           </h2>
@@ -183,7 +172,7 @@ export const SettingsView: React.FC = () => {
                         color: 'var(--df-accent-fg)',
                       }}
                     >
-                      <Check className="h-2.5 w-2.5 stroke-[3]" />
+                      <BiIcon name="check-lg" className="text-[11px] font-bold" />
                     </span>
                   )}
                 </span>
@@ -273,6 +262,29 @@ export const SettingsView: React.FC = () => {
               />
             </div>
           </div>
+
+          <div className="flex items-start justify-between gap-4 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 py-3">
+            <div className="space-y-0.5">
+              <label
+                htmlFor="pref-auto-sync-pdf"
+                className="block cursor-pointer text-sm font-medium text-[var(--df-text)]"
+              >
+                Automatically sync imported PDF schedules
+              </label>
+              <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
+                When enabled, valid dates and times sync straight to your calendar after PDF upload or paste. Conflicts or missing dates pause for review.
+              </p>
+            </div>
+            <input
+              id="pref-auto-sync-pdf"
+              type="checkbox"
+              checked={settings.autoSyncPdfSchedule}
+              onChange={(e) =>
+                updateSettings({ autoSyncPdfSchedule: e.target.checked })
+              }
+              className="mt-1 h-4 w-4 shrink-0 cursor-pointer rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+            />
+          </div>
         </div>
       </section>
 
@@ -345,7 +357,7 @@ export const SettingsView: React.FC = () => {
       {/* Reminders */}
       <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">
         <div className="flex items-center gap-2 border-b border-[var(--df-border)] pb-3">
-          <Bell className="h-4 w-4 text-[var(--df-text)]" />
+          <BiIcon name="bell" className="text-sm text-[var(--df-text)]" />
           <h2 className="text-sm font-semibold text-[var(--df-text)]">
             Reminders
           </h2>
@@ -421,7 +433,7 @@ export const SettingsView: React.FC = () => {
           </div>
 
           <p className="rounded-2xl bg-[var(--df-bg)] px-3.5 py-2.5 text-xs text-[var(--df-text-muted)]">
-            Browser reminders only fire while DayFlow stays open in your browser. They do not run when your browser is closed.
+            Full-screen reminders appear inside the open app viewport, and native browser notifications run separately when granted. Neither fires when your browser is closed.
           </p>
         </div>
       </section>
@@ -430,9 +442,9 @@ export const SettingsView: React.FC = () => {
       <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">
         <div className="flex items-center gap-2 border-b border-[var(--df-border)] pb-3">
           {authStatus === 'authenticated' ? (
-            <Cloud className="h-4 w-4 text-[var(--df-accent-soft-fg)]" />
+            <BiIcon name="cloud-check" className="text-sm text-[var(--df-accent-soft-fg)]" />
           ) : (
-            <HardDrive className="h-4 w-4 text-[var(--df-text-muted)]" />
+            <BiIcon name="hdd" className="text-sm text-[var(--df-text-muted)]" />
           )}
           <h2 className="text-sm font-semibold text-[var(--df-text)]">
             {authStatus === 'authenticated' ? 'Cloud account & backups' : 'Local data & backups'}
@@ -442,7 +454,7 @@ export const SettingsView: React.FC = () => {
         <div className="mt-4 space-y-4">
           {authStatus === 'authenticated' ? (
             <p className="rounded-2xl bg-[var(--df-bg)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--df-text-muted)]">
-              Signed in as <span className="font-medium text-[var(--df-text)]">{user?.email || 'your DayFlow account'}</span>. Your DayFlow workspace is isolated to your Supabase account and never mixed with local guest data.
+              Signed in as <span className="font-medium text-[var(--df-text)]">{user?.email || 'your Ekagra account'}</span>. Your Ekagra workspace is isolated to your Supabase account and never mixed with local guest data.
             </p>
           ) : (
             <div className="flex flex-col justify-between gap-3 rounded-2xl bg-[var(--df-bg)] px-3.5 py-2.5 sm:flex-row sm:items-center">
@@ -457,7 +469,7 @@ export const SettingsView: React.FC = () => {
                     onClick={() => void signInWithGoogle()}
                     className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-3 text-xs font-semibold text-[var(--df-accent-fg)] hover:brightness-95 disabled:opacity-50"
                   >
-                    <LogIn className="h-3.5 w-3.5" />
+                    <BiIcon name="box-arrow-in-right" className="text-xs" />
                     {isSigningIn ? 'Connecting...' : 'Sign in with Google'}
                   </button>
                   <button
@@ -466,7 +478,7 @@ export const SettingsView: React.FC = () => {
                     onClick={openAuthFromGuest}
                     className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-3 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)] disabled:opacity-50"
                   >
-                    <LogIn className="h-3.5 w-3.5" />
+                    <BiIcon name="box-arrow-in-right" className="text-xs" />
                     Sign in with Email
                   </button>
                 </div>
@@ -480,7 +492,7 @@ export const SettingsView: React.FC = () => {
               onClick={handleExport}
               className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)]"
             >
-              <Download className="h-3.5 w-3.5" />
+              <BiIcon name="download" className="text-xs" />
               Export JSON
             </button>
 
@@ -489,7 +501,7 @@ export const SettingsView: React.FC = () => {
               onClick={() => fileInputRef.current?.click()}
               className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)]"
             >
-              <Upload className="h-3.5 w-3.5" />
+              <BiIcon name="upload" className="text-xs" />
               Import JSON
             </button>
 
@@ -506,7 +518,7 @@ export const SettingsView: React.FC = () => {
               onClick={() => setConfirmClearOpen(true)}
               className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-rose-300 px-4 text-xs font-semibold text-rose-600 hover:bg-rose-500/10 dark:border-rose-900/50 dark:text-rose-400"
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <BiIcon name="trash3" className="text-xs" />
               Reset data
             </button>
           </div>
@@ -523,9 +535,9 @@ export const SettingsView: React.FC = () => {
         >
           <div className="w-full max-w-sm rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-6">
             <div className="flex items-center gap-2 text-rose-600 dark:text-rose-400">
-              <AlertTriangle className="h-5 w-5 shrink-0" />
+              <BiIcon name="exclamation-triangle" className="text-base shrink-0" />
               <h3 id="clear-data-title" className="font-display text-base font-bold text-[var(--df-text)]">
-                Clear all DayFlow data?
+                Clear all Ekagra data?
               </h3>
             </div>
             <p className="mt-2 text-xs leading-relaxed text-[var(--df-text-muted)]">

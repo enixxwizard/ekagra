@@ -8,9 +8,8 @@ import type {
   EnhancerActivitySnapshot,
   EnhancerTaskSnapshot,
   ScheduleEnhancementChange,
-  ScheduleEnhancementRequestBody,
   ScheduleEnhancementSuggestion,
-} from '../types/scheduleEnhancer';
+} from '../types/eku';
 import {
   getActivityDurationMinutes,
   minutesToTime24,
@@ -23,32 +22,6 @@ import { detectBreakSuggestions, detectConflicts, findAvailableSlots } from './s
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_24_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const BREAK_TITLE_RE = /\b(break|lunch|recess|rest|breather|tea|coffee|nap)\b/i;
-
-export function logEnhancerDiagnostic(
-  stage:
-    | 'button_clicked'
-    | 'schedule_loaded'
-    | 'deterministic_completed'
-    | 'gemini_request_started'
-    | 'gemini_response_received'
-    | 'suggestions_validated'
-    | 'error_encountered',
-  meta?: Record<string, string | number | boolean | null | undefined>
-): void {
-  const nodeEnv = (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env
-    ?.NODE_ENV;
-  const isDev =
-    (typeof import.meta !== 'undefined' &&
-      Boolean((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV)) ||
-    (nodeEnv !== undefined && nodeEnv !== 'production');
-  if (!isDev) return;
-
-  if (meta) {
-    console.info(`[DayFlow Enhancer] ${stage}`, meta);
-  } else {
-    console.info(`[DayFlow Enhancer] ${stage}`);
-  }
-}
 
 export function isValidIsoDate(val: unknown): val is string {
   if (typeof val !== 'string' || !ISO_DATE_RE.test(val)) return false;
@@ -70,7 +43,7 @@ export function isBreakLikeTitle(title: string): boolean {
   return BREAK_TITLE_RE.test(title);
 }
 
-export function sanitizeActivitiesForEnhancer(
+export function sanitizeActivitiesForAnalysis(
   activities: ScheduleActivity[] | EnhancerActivitySnapshot[]
 ): { valid: ScheduleActivity[]; invalidCount: number } {
   const valid: ScheduleActivity[] = [];
@@ -115,16 +88,12 @@ export function sanitizeActivitiesForEnhancer(
   return { valid, invalidCount };
 }
 
-export function buildEnhancerRequestPayload(params: {
-  activities: ScheduleActivity[];
-  tasks: TaskItem[];
-  todayISO: string;
-  nowMinutes: number;
-  timeZone: string;
-  dailyCapacityHours: number;
-}): ScheduleEnhancementRequestBody {
+export function stripActivitiesAndTasksForEku(
+  rawActivities: ScheduleActivity[],
+  rawTasks: TaskItem[]
+): { activities: EnhancerActivitySnapshot[]; tasks: EnhancerTaskSnapshot[] } {
   // Strip private notes, descriptions, quotations, and auth fields
-  const activities: EnhancerActivitySnapshot[] = params.activities.map((a) => ({
+  const activities: EnhancerActivitySnapshot[] = rawActivities.map((a) => ({
     id: a.id,
     title: a.title.trim().slice(0, 120),
     date: a.date,
@@ -153,7 +122,7 @@ export function buildEnhancerRequestPayload(params: {
       : {},
   }));
 
-  const tasks: EnhancerTaskSnapshot[] = params.tasks.map((t) => ({
+  const tasks: EnhancerTaskSnapshot[] = rawTasks.map((t) => ({
     id: t.id,
     title: t.title.trim().slice(0, 120),
     priority: t.priority,
@@ -167,14 +136,7 @@ export function buildEnhancerRequestPayload(params: {
     scheduledActivityId: t.scheduledActivityId ?? null,
   }));
 
-  return {
-    todayISO: params.todayISO,
-    nowMinutes: Math.max(0, Math.min(1439, Math.round(params.nowMinutes))),
-    timeZone: params.timeZone || 'Local Time',
-    dailyCapacityHours: Math.max(2, Math.min(16, params.dailyCapacityHours || 8)),
-    activities,
-    tasks,
-  };
+  return { activities, tasks };
 }
 
 export function runDeterministicScheduleAnalysis(params: {
@@ -194,7 +156,7 @@ export function runDeterministicScheduleAnalysis(params: {
   const nowMinutes = Math.max(0, Math.min(1439, Math.round(params.nowMinutes)));
   const capacityMinutes = Math.max(60, Math.round((params.dailyCapacityHours || 8) * 60));
 
-  const { valid: validActivities, invalidCount } = sanitizeActivitiesForEnhancer(params.activities);
+  const { valid: validActivities, invalidCount } = sanitizeActivitiesForAnalysis(params.activities);
 
   const days: DeterministicDaySummary[] = [];
   const overlaps: DeterministicOverlapFinding[] = [];
@@ -305,7 +267,6 @@ export function runDeterministicScheduleAnalysis(params: {
     });
   }
 
-  // Deadline & unscheduled task conflicts
   const deadlineFindings: DeterministicDeadlineFinding[] = [];
   const activityById = new Map(validActivities.map((a) => [a.id, a]));
 
@@ -366,7 +327,6 @@ export function runDeterministicScheduleAnalysis(params: {
     }
   }
 
-  // Also check if total unscheduled high-priority tasks due by today/tomorrow exceed remaining free slots
   const totalBreakGaps = days.reduce((sum, d) => sum + d.contiguousWorkRuns.length, 0);
   const hasActionableFindings =
     overlaps.length > 0 ||
@@ -468,7 +428,10 @@ export function validateSingleChangeCandidate(
   if (change.type === 'reschedule_activity') {
     const act = activityMap.get(change.activityId);
     if (!act) {
-      return { valid: false, error: `Activity "${change.activityTitle || change.activityId}" no longer exists.` };
+      return {
+        valid: false,
+        error: `Activity "${change.activityTitle || change.activityId}" no longer exists.`,
+      };
     }
     if (!isValidIsoDate(change.occurrenceDate) || !occursOnDate(act, change.occurrenceDate)) {
       return {
@@ -507,7 +470,6 @@ export function validateSingleChangeCandidate(
     }
 
     if (change.newDate === context.todayISO && startMin < context.nowMinutes) {
-      // Allow trimming end time only if startTime is unchanged and endMin > nowMinutes
       const keepingSameStart =
         change.newDate === change.occurrenceDate &&
         change.newStartTime === origStart &&
@@ -542,7 +504,10 @@ export function validateSingleChangeCandidate(
   if (change.type === 'schedule_task') {
     const task = taskMap.get(change.taskId);
     if (!task) {
-      return { valid: false, error: `Task "${change.taskTitle || change.taskId}" no longer exists.` };
+      return {
+        valid: false,
+        error: `Task "${change.taskTitle || change.taskId}" no longer exists.`,
+      };
     }
     if (task.completed) {
       return { valid: false, error: `Task "${task.title}" is already completed.` };
@@ -611,7 +576,7 @@ export function validateSingleChangeCandidate(
   return { valid: true };
 }
 
-export function validateEnhancementSuggestions(
+export function validateScheduleSuggestions(
   rawSuggestions: unknown,
   context: {
     activities: ScheduleActivity[] | EnhancerActivitySnapshot[];
@@ -624,10 +589,10 @@ export function validateEnhancementSuggestions(
   rejectedReasons: string[];
 } {
   if (!Array.isArray(rawSuggestions)) {
-    return { validSuggestions: [], rejectedReasons: ['Model response suggestions was not an array.'] };
+    return { validSuggestions: [], rejectedReasons: ['Suggestions must be an array.'] };
   }
 
-  const { valid: sanitizedActivities } = sanitizeActivitiesForEnhancer(context.activities);
+  const { valid: sanitizedActivities } = sanitizeActivitiesForAnalysis(context.activities);
   const sanitizedTasks: TaskItem[] = context.tasks.map((t) => ({
     id: t.id,
     title: t.title,
@@ -650,35 +615,40 @@ export function validateEnhancementSuggestions(
   const rejectedReasons: string[] = [];
 
   for (let idx = 0; idx < rawSuggestions.length; idx++) {
-    if (validSuggestions.length >= 3) break;
+    if (validSuggestions.length >= 4) break;
     const raw = rawSuggestions[idx];
     if (!raw || typeof raw !== 'object') {
-      rejectedReasons.push(`Suggestion ${idx + 1}: not an object.`);
+      rejectedReasons.push(`Proposal ${idx + 1}: not an object.`);
       continue;
     }
 
     const obj = raw as Record<string, unknown>;
     const title = typeof obj.title === 'string' ? obj.title.trim() : '';
     const reason = typeof obj.reason === 'string' ? obj.reason.trim() : '';
-    const evidence = typeof obj.evidence === 'string' ? obj.evidence.trim() : '';
-    const beforePreview = typeof obj.beforePreview === 'string' ? obj.beforePreview.trim() : '';
-    const afterPreview = typeof obj.afterPreview === 'string' ? obj.afterPreview.trim() : '';
-    const tradeOffs = typeof obj.tradeOffs === 'string' ? obj.tradeOffs.trim() : '';
+    const evidenceRaw = typeof obj.evidence === 'string' ? obj.evidence.trim() : '';
+    const beforeRaw = typeof obj.beforePreview === 'string' ? obj.beforePreview.trim() : '';
+    const afterRaw = typeof obj.afterPreview === 'string' ? obj.afterPreview.trim() : '';
+    const tradeOffsRaw = typeof obj.tradeOffs === 'string' ? obj.tradeOffs.trim() : '';
 
-    if (!title || !reason || !evidence || !beforePreview || !afterPreview || !tradeOffs) {
-      rejectedReasons.push(`Suggestion ${idx + 1}: missing required descriptive fields.`);
+    if (!title || !reason) {
+      rejectedReasons.push(`Proposal ${idx + 1}: missing required title or reason.`);
       continue;
     }
 
+    const evidence = evidenceRaw || reason;
+    const beforePreview = beforeRaw || 'Current schedule block';
+    const afterPreview = afterRaw || title;
+    const tradeOffs = tradeOffsRaw || 'Minimal trade-off';
+
     if (!Array.isArray(obj.changes) || obj.changes.length === 0) {
-      rejectedReasons.push(`Suggestion "${title}": missing proposed changes.`);
+      rejectedReasons.push(`Proposal "${title}": missing proposed changes.`);
       continue;
     }
 
     const normalizedChanges: ScheduleEnhancementChange[] = [];
     let changeInvalidReason: string | null = null;
 
-    for (const rawCh of obj.changes.slice(0, 3)) {
+    for (const rawCh of obj.changes.slice(0, 6)) {
       if (!rawCh || typeof rawCh !== 'object') {
         changeInvalidReason = 'Invalid change object.';
         break;
@@ -748,11 +718,10 @@ export function validateEnhancementSuggestions(
     }
 
     if (changeInvalidReason) {
-      rejectedReasons.push(`Suggestion "${title}": ${changeInvalidReason}`);
+      rejectedReasons.push(`Proposal "${title}": ${changeInvalidReason}`);
       continue;
     }
 
-    // Validate each change against live schedule + sibling changes
     let allValid = true;
     for (const ch of normalizedChanges) {
       const check = validateSingleChangeCandidate(ch, {
@@ -763,7 +732,7 @@ export function validateEnhancementSuggestions(
         siblingChanges: normalizedChanges,
       });
       if (!check.valid) {
-        rejectedReasons.push(`Suggestion "${title}": ${check.error}`);
+        rejectedReasons.push(`Proposal "${title}": ${check.error}`);
         allValid = false;
         break;
       }
@@ -775,7 +744,7 @@ export function validateEnhancementSuggestions(
       id:
         typeof obj.id === 'string' && obj.id.trim()
           ? obj.id.trim().slice(0, 48)
-          : `enh-${idx + 1}`,
+          : `eku-plan-${idx + 1}`,
       title,
       reason,
       evidence,

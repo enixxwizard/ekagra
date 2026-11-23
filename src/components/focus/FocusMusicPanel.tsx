@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Headphones, Link2, Trash2 } from 'lucide-react';
+import { BiIcon } from '../ui/BiIcon';
 import { useDayFlow } from '../../context/DayFlowContext';
 import { validateAndBuildMusicEmbed } from '../../utils/musicUrl';
 
@@ -53,7 +53,7 @@ export const FocusMusicPanel: React.FC = () => {
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Headphones className="h-4 w-4 text-[var(--df-text-muted)]" />
+          <BiIcon name="headphones" className="text-[15px] text-[var(--df-text-muted)]" />
           <h2 className="text-sm font-semibold text-[var(--df-text)]">
             Focus music
           </h2>
@@ -74,7 +74,7 @@ export const FocusMusicPanel: React.FC = () => {
               aria-label="Clear music embed"
               className="rounded-lg p-1.5 text-[var(--df-text-subtle)] hover:text-rose-500"
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <BiIcon name="trash3" className="text-[13px]" />
             </button>
           </div>
         )}
@@ -84,7 +84,7 @@ export const FocusMusicPanel: React.FC = () => {
         <form onSubmit={handleLoadUrl} className="mt-3 space-y-2">
           <div className="flex gap-2">
             <div className="relative flex-1">
-              <Link2 className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-[var(--df-text-subtle)]" />
+              <BiIcon name="link-45deg" className="pointer-events-none absolute top-1/2 left-3 text-[14px] -translate-y-1/2 text-[var(--df-text-subtle)]" />
               <input
                 type="url"
                 value={inputUrl}
