@@ -1,8 +1,12 @@
+import dns from 'node:dns/promises';
+import net from 'node:net';
 import type {
   EkuResourceItem,
   EkuResourceLanguageNotice,
   EkuResourceType,
 } from '../src/types/eku';
+import { getGeminiClient, searchStudyResourcesWithGeminiGrounding } from './aiBrain';
+import { isBlockedIpAddress } from './libraryStore';
 
 const BLOCKED_HOSTNAME_PATTERNS = [
   /^localhost$/i,
@@ -120,9 +124,24 @@ export function isSafeExternalHttpsUrl(rawUrl: string): URL | null {
     const hostname = parsed.hostname.toLowerCase();
     if (!hostname || !hostname.includes('.')) return null;
     if (BLOCKED_HOSTNAME_PATTERNS.some((re) => re.test(hostname))) return null;
+    if (net.isIP(hostname) && isBlockedIpAddress(hostname)) return null;
     return parsed;
   } catch {
     return null;
+  }
+}
+
+async function resolveAndVerifyPublicHost(parsed: URL): Promise<boolean> {
+  const host = parsed.hostname.toLowerCase();
+  if (net.isIP(host)) {
+    return !isBlockedIpAddress(host);
+  }
+  try {
+    const resolved = await dns.lookup(host, { all: true, verbatim: true });
+    if (!resolved || resolved.length === 0) return false;
+    return resolved.every((entry) => !isBlockedIpAddress(entry.address));
+  } catch {
+    return false;
   }
 }
 
@@ -140,6 +159,9 @@ async function verifyUrlReachable(rawUrl: string): Promise<VerifiedUrlCheck> {
   for (let hop = 0; hop < 3; hop++) {
     const safeUrl = isSafeExternalHttpsUrl(currentUrl);
     if (!safeUrl) return { ok: false, finalUrl: rawUrl, contentType: '' };
+
+    const publicOk = await resolveAndVerifyPublicHost(safeUrl);
+    if (!publicOk) return { ok: false, finalUrl: rawUrl, contentType: '' };
 
     try {
       const headRes = await fetch(safeUrl.toString(), {
@@ -446,10 +468,12 @@ export function getSearchApiConfig() {
   const tavilyKey = (process.env.TAVILY_API_KEY || '').trim();
   const braveKey = (process.env.BRAVE_SEARCH_API_KEY || '').trim();
   const youtubeKey = (process.env.YOUTUBE_API_KEY || '').trim();
+  const geminiSearchAvailable = Boolean(getGeminiClient());
   return {
     tavilyKey: tavilyKey && tavilyKey !== 'MY_TAVILY_API_KEY' ? tavilyKey : '',
     braveKey: braveKey && braveKey !== 'MY_BRAVE_SEARCH_API_KEY' ? braveKey : '',
     youtubeKey: youtubeKey && youtubeKey !== 'MY_YOUTUBE_API_KEY' ? youtubeKey : '',
+    geminiSearchAvailable,
   };
 }
 
@@ -480,14 +504,14 @@ export async function executeResourceSearch(
     };
   }
 
-  const { tavilyKey, braveKey, youtubeKey } = getSearchApiConfig();
-  if (!tavilyKey && !braveKey && !youtubeKey) {
+  const { tavilyKey, braveKey, youtubeKey, geminiSearchAvailable } = getSearchApiConfig();
+  if (!tavilyKey && !braveKey && !youtubeKey && !geminiSearchAvailable) {
     return {
       status: 'search_not_configured',
       languageUsed: language,
       resources: [],
       message:
-        'Web search APIs are not configured on this server (missing TAVILY_API_KEY, BRAVE_SEARCH_API_KEY, or YOUTUBE_API_KEY). Add at least one in Settings > Secrets so Eku can look up verified study links.',
+        'Web search is not configured on this server (missing GEMINI_API_KEY or search API keys). Add GEMINI_API_KEY in Settings > Secrets so Eku can look up verified study links.',
     };
   }
 
@@ -501,12 +525,15 @@ export async function executeResourceSearch(
       raw.push(...(await searchTavily(query, tavilyKey)));
     } else if (braveKey) {
       raw.push(...(await searchBrave(query, braveKey)));
+    } else if (geminiSearchAvailable) {
+      raw.push(...(await searchStudyResourcesWithGeminiGrounding(query)));
     }
     return raw;
   };
 
+  const hasWebSearchBackend = Boolean(tavilyKey || braveKey || geminiSearchAvailable);
   const webQueries: string[] = [];
-  if (tavilyKey || braveKey) {
+  if (hasWebSearchBackend) {
     if (isNonEnglish) {
       webQueries.push(`${topic} ${language} tutorial notes`);
       if (includePdfs) {
@@ -515,7 +542,7 @@ export async function executeResourceSearch(
     } else {
       webQueries.push(`${topic} official documentation lecture notes`);
       if (includePdfs) {
-        webQueries.push(`${topic} university lecture notes filetype:pdf`);
+        webQueries.push(`${topic} university lecture notes pdf`);
       }
     }
   }
@@ -576,8 +603,8 @@ export async function executeResourceSearch(
   let languageNotice: EkuResourceLanguageNotice | undefined;
 
   if (includePdfs && isNonEnglish && matchingLangPdfs.length === 0) {
-    if (params.allowFallbackPdfLanguage && (tavilyKey || braveKey)) {
-      const enRaw = await runWebSearch(`${topic} lecture notes filetype:pdf`);
+    if (params.allowFallbackPdfLanguage && hasWebSearchBackend) {
+      const enRaw = await runWebSearch(`${topic} lecture notes pdf`);
       for (const cand of enRaw) {
         const safe = isSafeExternalHttpsUrl(cand.url);
         if (!safe || seenUrls.has(safe.toString())) continue;
@@ -604,7 +631,7 @@ export async function executeResourceSearch(
       languageNotice = {
         requestedLanguage: language,
         missingPdfInRequestedLanguage: true,
-        alternativePdfAvailable: Boolean(tavilyKey || braveKey),
+        alternativePdfAvailable: hasWebSearchBackend,
         topic,
         questionPrompt:
           videoResults.length > 0

@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { format, parseISO } from 'date-fns';
+import { ImprovePlanPanel } from '../components/plan/ImprovePlanPanel';
 import { BiIcon } from '../components/ui/BiIcon';
 import { useDayFlow } from '../context/DayFlowContext';
 import { ResolvedActivity } from '../types/dayflow';
@@ -306,6 +307,9 @@ export const PlanView: React.FC = () => {
           Import PDF
         </button>
       </div>
+
+      {/* 5. EKAGRA Free AI Schedule Coach & Plan Enhancer */}
+      <ImprovePlanPanel />
     </div>
   );
 };

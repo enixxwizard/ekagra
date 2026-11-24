@@ -56,8 +56,7 @@ export const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children })
   if (
     status === 'unauthenticated' ||
     status === 'email_confirmation_pending' ||
-    status === 'password_recovery' ||
-    status === 'error'
+    status === 'password_recovery'
   ) {
     return <AuthScreen />;
   }

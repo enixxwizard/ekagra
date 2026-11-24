@@ -3,7 +3,11 @@ import { useAuth } from '../hooks/useAuth';
 import {
   createEmptyState,
   dayFlowRepository,
+  hybridLocalRepository,
 } from '../services/storage/repository';
+import { idbClearAllStoresExceptBlobs } from '../services/storage/indexedDb';
+import { preferencesStore } from '../services/storage/preferencesStore';
+import { publishSyncEvent, subscribeSyncChannel } from '../services/storage/syncChannel';
 import { supabaseDayFlowRepository } from '../services/storage/supabaseRepository';
 import {
   ActivityCategory,
@@ -33,6 +37,7 @@ import type {
   PdfDailyPlanItem,
   PdfDeadlineItem,
   PdfMonthlyGoalItem,
+  PdfRoadmapMilestoneItem,
   PdfWeeklyPlanItem,
   StructuredPdfPlan,
 } from '../types/pdfSchedule';
@@ -50,6 +55,7 @@ import {
   clearAllReminderStateForScope,
   clearReminderKeysForActivityIds,
   evaluateActivityReminders,
+  hydrateReminderStateFromIndexedDb,
   markReminderDismissed,
   markReminderSnoozed,
 } from '../utils/notifications';
@@ -141,6 +147,7 @@ export interface StructuredPdfImportPayload {
   };
   dailyItems?: PdfDailyPlanItem[];
   monthlyGoals?: PdfMonthlyGoalItem[];
+  roadmapMilestones?: PdfRoadmapMilestoneItem[];
   deadlines?: PdfDeadlineItem[];
 }
 
@@ -280,8 +287,10 @@ interface DayFlowContextValue {
   // Settings & Storage
   updateSettings: (patch: Partial<AppSettings>) => void;
   exportBackup: () => string;
+  exportFullBackup: () => Promise<string>;
   importBackup: (rawJson: string) => void;
-  clearAllData: () => void;
+  importFullBackup: (rawJson: string) => Promise<void>;
+  clearAllData: () => Promise<void>;
 }
 
 const DayFlowContext = createContext<DayFlowContextValue | null>(null);
@@ -310,7 +319,27 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           userName: user?.fullName?.trim() || user?.email?.split('@')[0] || 'Alex',
         })
   );
-  const [activePage, setActivePage] = useState<NavPage>('plan');
+  const [activePage, setActivePageState] = useState<NavPage>(() => {
+    const saved = preferencesStore.getPreference('activePage');
+    if (
+      saved === 'plan' ||
+      saved === 'calendar' ||
+      saved === 'focus' ||
+      saved === 'capture' ||
+      saved === 'library' ||
+      saved === 'insights' ||
+      saved === 'settings'
+    ) {
+      return saved;
+    }
+    return 'plan';
+  });
+
+  const setActivePage = useCallback((page: NavPage) => {
+    preferencesStore.setPreference('activePage', page);
+    setActivePageState(page);
+  }, []);
+
   const [calendarTab, setCalendarTab] = useState<CalendarSubTab>('timeline');
   const [insightsTab, setInsightsTab] = useState<InsightsSubTab>('overview');
   const [isQuickAddTaskOpen, setQuickAddTaskOpen] = useState(false);
@@ -323,7 +352,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const openCapturePdfImport = useCallback(() => {
     setPendingPdfPickerOpen(true);
     setActivePage('capture');
-  }, []);
+  }, [setActivePage]);
 
   const consumePendingPdfPickerOpen = useCallback(() => {
     setPendingPdfPickerOpen(false);
@@ -356,7 +385,8 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const corruptionNotifiedRef = useRef(false);
   const cloudWarnedScopeRef = useRef<string | null>(null);
   const cloudSyncErrorShownRef = useRef(false);
-  const loadedScopeRef = useRef<string | null>(authStatus === 'guest' ? 'guest' : null);
+  const loadedScopeRef = useRef<string | null>(null);
+  const isApplyingRemoteSyncRef = useRef(false);
   const cloudSchemaReadyRef = useRef(false);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -376,25 +406,37 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Hydrate data strictly for the active auth scope (Guest localStorage vs Authenticated Supabase)
+  // Hydrate data strictly for the active auth scope (Local IndexedDB vs Authenticated Supabase)
   useEffect(() => {
     if (authStatus === 'guest') {
+      let cancelled = false;
       cloudSchemaReadyRef.current = false;
-      const loaded = dayFlowRepository.load();
-      setState(loaded.state);
-      setRemainingSeconds(computeRemainingSeconds(loaded.state));
-      loadedScopeRef.current = 'guest';
+      loadedScopeRef.current = null;
 
-      if (loaded.recoveredFromCorruption && !corruptionNotifiedRef.current) {
-        corruptionNotifiedRef.current = true;
-        pushToast({
-          type: 'warning',
-          title: 'Recovered from invalid local data',
-          description:
-            'Stored browser data was unreadable and has been safely reset so Ekagra can run normally.',
-        });
-      }
-      return;
+      void Promise.all([
+        hybridLocalRepository.loadAsync(),
+        hydrateReminderStateFromIndexedDb('guest'),
+      ]).then(([loaded]) => {
+        if (cancelled) return;
+        isApplyingRemoteSyncRef.current = true;
+        setState(loaded.state);
+        setRemainingSeconds(computeRemainingSeconds(loaded.state));
+        loadedScopeRef.current = 'guest';
+
+        if (loaded.recoveredFromCorruption && !corruptionNotifiedRef.current) {
+          corruptionNotifiedRef.current = true;
+          pushToast({
+            type: 'warning',
+            title: 'Recovered from invalid local data',
+            description:
+              'Unreadable device data was safely reset so Ekagra can run normally.',
+          });
+        }
+      });
+
+      return () => {
+        cancelled = true;
+      };
     }
 
     if (authStatus === 'authenticated' && user) {
@@ -406,6 +448,8 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const freshEmpty = createEmptyState({ userName: fallbackName });
       setState(freshEmpty);
       setRemainingSeconds(computeRemainingSeconds(freshEmpty));
+
+      void hydrateReminderStateFromIndexedDb(user.id);
 
       supabaseDayFlowRepository
         .loadForUser(user.id, fallbackName)
@@ -448,11 +492,37 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     cloudSchemaReadyRef.current = false;
   }, [authStatus, user, cloudRefreshNonce, pushToast]);
 
-  // Persist state changes strictly to the active scope (never mix guest and authenticated data)
+  // Multi-tab real-time local workspace & reminder synchronization
+  useEffect(() => {
+    if (authStatus !== 'guest') return;
+    return subscribeSyncChannel(['workspace', 'reminders', 'storage_reset'], (event) => {
+      if (event.topic === 'reminders') {
+        void hydrateReminderStateFromIndexedDb('guest');
+        return;
+      }
+      void Promise.all([
+        hybridLocalRepository.loadAsync(),
+        hydrateReminderStateFromIndexedDb('guest'),
+      ]).then(([loaded]) => {
+        isApplyingRemoteSyncRef.current = true;
+        setState(loaded.state);
+        setRemainingSeconds(computeRemainingSeconds(loaded.state));
+        if (event.topic === 'storage_reset') {
+          setReminderQueue([]);
+        }
+      });
+    });
+  }, [authStatus]);
+
+  // Persist state changes strictly to the active scope (never mix local and authenticated data)
   useEffect(() => {
     if (authStatus === 'guest') {
       if (loadedScopeRef.current !== 'guest') return;
-      dayFlowRepository.save(state);
+      if (isApplyingRemoteSyncRef.current) {
+        isApplyingRemoteSyncRef.current = false;
+        return;
+      }
+      hybridLocalRepository.save(state);
       return;
     }
 
@@ -553,68 +623,85 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     [getModeDurationSeconds]
   );
 
+  const timerFinalizingRef = useRef(false);
+
+  // Keep remainingSeconds synchronized whenever timer is idle/paused or duration settings change
+  useEffect(() => {
+    if (state.activeTimer.status !== 'running') {
+      timerFinalizingRef.current = false;
+      setRemainingSeconds(computeRemainingSeconds(state));
+    }
+  }, [
+    state.activeTimer.status,
+    state.activeTimer.durationSeconds,
+    state.activeTimer.elapsedBeforePauseMs,
+  ]);
+
   // Accurate timestamp-based timer loop (handles inactive tabs and refresh recovery)
   useEffect(() => {
+    if (state.activeTimer.status !== 'running') {
+      return;
+    }
+
     const syncTick = () => {
-      setState((prev) => {
-        if (prev.activeTimer.status !== 'running') {
-          return prev;
-        }
-        const rem = computeRemainingSeconds(prev, Date.now());
-        setRemainingSeconds(rem);
+      const current = stateRef.current;
+      if (current.activeTimer.status !== 'running') {
+        return;
+      }
 
-        if (rem <= 0) {
-          if (prev.settings.soundAlerts) {
-            playGentleChime();
-          }
-          const nextState = finalizeTimerSession(
-            prev,
-            prev.activeTimer.durationSeconds,
-            true
-          );
-          setRemainingSeconds(nextState.activeTimer.durationSeconds);
-          const createdSession = nextState.focusSessions[0];
-          if (createdSession && prev.activeTimer.mode === 'focus') {
-            queueMicrotask(() => setLastCompletedSessionId(createdSession.id));
-          }
+      const rem = computeRemainingSeconds(current, Date.now());
+      setRemainingSeconds(rem);
 
-          if (
-            prev.settings.notificationsEnabled &&
-            typeof window !== 'undefined' &&
-            'Notification' in window &&
-            Notification.permission === 'granted'
-          ) {
-            try {
-              new Notification('Ekagra Focus Session Complete', {
-                body:
-                  prev.activeTimer.mode === 'focus'
-                    ? 'Focus block finished! Time for a short break.'
-                    : 'Break finished! Ready to focus again.',
-              });
-            } catch {
-              // Ignore notification error
-            }
-          }
-          pushToast({
-            type: 'success',
-            title:
-              prev.activeTimer.mode === 'focus'
-                ? 'Focus session logged'
-                : 'Break complete',
-            description: `${Math.round(prev.activeTimer.durationSeconds / 60)} minutes recorded.`,
-          });
-          return nextState;
+      if (rem <= 0 && !timerFinalizingRef.current) {
+        timerFinalizingRef.current = true;
+
+        if (current.settings.soundAlerts) {
+          playGentleChime();
         }
-        return prev;
-      });
+
+        const nextState = finalizeTimerSession(
+          current,
+          current.activeTimer.durationSeconds,
+          true
+        );
+        setState(nextState);
+        setRemainingSeconds(nextState.activeTimer.durationSeconds);
+
+        const createdSession = nextState.focusSessions[0];
+        if (createdSession && current.activeTimer.mode === 'focus') {
+          setLastCompletedSessionId(createdSession.id);
+        }
+
+        if (
+          current.settings.notificationsEnabled &&
+          typeof window !== 'undefined' &&
+          'Notification' in window &&
+          Notification.permission === 'granted'
+        ) {
+          try {
+            new Notification('Ekagra Focus Session Complete', {
+              body:
+                current.activeTimer.mode === 'focus'
+                  ? 'Focus block finished! Time for a short break.'
+                  : 'Break finished! Ready to focus again.',
+            });
+          } catch {
+            // Ignore notification error
+          }
+        }
+
+        pushToast({
+          type: 'success',
+          title:
+            current.activeTimer.mode === 'focus'
+              ? 'Focus session logged'
+              : 'Break complete',
+          description: `${Math.round(current.activeTimer.durationSeconds / 60)} minutes recorded.`,
+        });
+      }
     };
 
     syncTick();
-
-    if (state.activeTimer.status !== 'running') {
-      setRemainingSeconds(computeRemainingSeconds(state));
-      return;
-    }
 
     const intervalId = window.setInterval(syncTick, 500);
     const onVisibility = () => {
@@ -1259,7 +1346,8 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           };
         }
       } else {
-        dayFlowRepository.save(preview.nextState);
+        await hybridLocalRepository.saveAsync(preview.nextState);
+        isApplyingRemoteSyncRef.current = true;
       }
 
       setState(preview.nextState);
@@ -1348,7 +1436,6 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           typeof overrideDurationMinutes === 'number'
             ? Math.max(60, overrideDurationMinutes * 60)
             : getModeDurationSeconds(prev.activeTimer.mode, prev.settings);
-        setRemainingSeconds(nextSeconds);
         return {
           ...prev,
           activeTimer: {
@@ -1368,7 +1455,6 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     (mode: FocusModeType) => {
       setState((prev) => {
         const nextDuration = getModeDurationSeconds(mode, prev.settings);
-        setRemainingSeconds(nextDuration);
         return {
           ...prev,
           activeTimer: {
@@ -1396,17 +1482,18 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }, []);
 
   const finishAndLogTimerNow = useCallback(() => {
-    setState((prev) => {
-      const rem = computeRemainingSeconds(prev, Date.now());
-      const elapsed = Math.max(60, prev.activeTimer.durationSeconds - rem);
-      const next = finalizeTimerSession(prev, elapsed, false);
-      setRemainingSeconds(next.activeTimer.durationSeconds);
-      const createdSession = next.focusSessions[0];
-      if (createdSession && prev.activeTimer.mode === 'focus') {
-        queueMicrotask(() => setLastCompletedSessionId(createdSession.id));
-      }
-      return next;
-    });
+    const current = stateRef.current;
+    const rem = computeRemainingSeconds(current, Date.now());
+    const elapsed = Math.max(60, current.activeTimer.durationSeconds - rem);
+    const next = finalizeTimerSession(current, elapsed, false);
+    setState(next);
+    setRemainingSeconds(next.activeTimer.durationSeconds);
+
+    const createdSession = next.focusSessions[0];
+    if (createdSession && current.activeTimer.mode === 'focus') {
+      setLastCompletedSessionId(createdSession.id);
+    }
+
     pushToast({
       type: 'success',
       title: 'Session saved',
@@ -1747,7 +1834,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
         const newlyAddedRules: ScheduleActivity[] = [];
         for (const rule of groupedRules) {
-          const daysSig = (rule.recurrence.daysOfWeek ?? []).join(',');
+          const daysSig = [...(rule.recurrence.daysOfWeek ?? [])].sort((a, b) => a - b).join(',');
           const ruleFingerprint = computeImportFingerprint(
             payload.sourceFile,
             rule.title,
@@ -1833,6 +1920,7 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
             recurrence: { frequency: 'none', endDate: null },
             excludedDates: [],
             occurrenceOverrides: {},
+            ...(item.optional ? { isOptional: true } : {}),
             createdAt: now,
             updatedAt: now,
           };
@@ -1897,6 +1985,58 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           });
           fingerprintSet.add(noteFingerprint);
           notesAdded += 1;
+        }
+      }
+
+      // 3B. Roadmap Milestones -> Structured Capture Note (never fake daily calendar blocks)
+      if (payload.roadmapMilestones && payload.roadmapMilestones.length > 0) {
+        const activeMilestones = payload.roadmapMilestones.filter((m) => m.title.trim());
+        if (activeMilestones.length > 0) {
+          const rmNoteTitle = `${payload.sourceFile.replace(/\.pdf$/i, '')} — Roadmap Milestones`;
+          const rmFingerprint = computeImportFingerprint(
+            payload.sourceFile,
+            rmNoteTitle,
+            String(activeMilestones.length),
+            'roadmap-milestones'
+          );
+
+          const matchesExistingRm = nextNotes.some(
+            (n) =>
+              n.title.trim().toLowerCase() === rmNoteTitle.toLowerCase() &&
+              n.content.includes(activeMilestones[0].title.trim())
+          );
+
+          if (fingerprintSet.has(rmFingerprint) || matchesExistingRm) {
+            skippedDuplicates += activeMilestones.length;
+          } else {
+            const rmContent = [
+              `Source: ${payload.sourceFile}`,
+              '',
+              ...activeMilestones.map((m) => {
+                const targetTag = m.targetDate
+                  ? ` (${m.targetDate})`
+                  : m.targetMonth
+                  ? ` (${m.targetMonth}/${m.targetYear ?? ''})`
+                  : '';
+                return `• ${m.phaseLabel}: ${m.title}${targetTag}`;
+              }),
+            ].join('\n');
+
+            nextNotes.unshift({
+              id: generateId(),
+              title: rmNoteTitle,
+              content: rmContent,
+              category: activeMilestones[0].category ?? 'Study',
+              linkedTaskId: null,
+              linkedActivityId: null,
+              linkedFocusSessionId: null,
+              sourceQuotationId: null,
+              createdAt: now,
+              updatedAt: now,
+            });
+            fingerprintSet.add(rmFingerprint);
+            notesAdded += 1;
+          }
         }
       }
 
@@ -2038,7 +2178,8 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
           await supabaseDayFlowRepository.saveForUser(user.id, nextState);
         } else {
-          dayFlowRepository.save(nextState);
+          await hybridLocalRepository.saveAsync(nextState);
+          isApplyingRemoteSyncRef.current = true;
         }
       } catch (err) {
         return {
@@ -2195,7 +2336,8 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
           await supabaseDayFlowRepository.saveForUser(user.id, nextState);
         } else {
-          dayFlowRepository.save(nextState);
+          await hybridLocalRepository.saveAsync(nextState);
+          isApplyingRemoteSyncRef.current = true;
         }
       } catch (err) {
         return {
@@ -2243,7 +2385,6 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (prev.activeTimer.status === 'idle' && durationSettingChanged) {
           const nextDur = getModeDurationSeconds(prev.activeTimer.mode, nextSettings);
           nextTimer = { ...prev.activeTimer, durationSeconds: nextDur };
-          setRemainingSeconds(nextDur);
         }
         return {
           ...prev,
@@ -2256,16 +2397,31 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
   );
 
   const exportBackup = useCallback(() => {
-    return dayFlowRepository.exportJSON(state);
+    return hybridLocalRepository.exportJSON(state);
   }, [state]);
 
+  const exportFullBackup = useCallback(async () => {
+    return hybridLocalRepository.exportFullBackupJson(stateRef.current);
+  }, []);
+
   const importBackup = useCallback((rawJson: string) => {
-    const validated = dayFlowRepository.parseAndValidateImport(rawJson);
+    const validated = hybridLocalRepository.parseAndValidateImport(rawJson);
     setState(validated);
     setRemainingSeconds(computeRemainingSeconds(validated));
   }, []);
 
-  const clearAllData = useCallback(() => {
+  const importFullBackup = useCallback(
+    async (rawJson: string) => {
+      const validated = await hybridLocalRepository.importFullBackupAsync(rawJson);
+      isApplyingRemoteSyncRef.current = true;
+      setState(validated);
+      setRemainingSeconds(computeRemainingSeconds(validated));
+      await hydrateReminderStateFromIndexedDb(reminderScopeKey);
+    },
+    [reminderScopeKey]
+  );
+
+  const clearAllData = useCallback(async () => {
     clearAllReminderStateForScope(reminderScopeKey);
     setReminderQueue([]);
     if (authStatus === 'authenticated' && user) {
@@ -2275,7 +2431,11 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setRemainingSeconds(cleared.activeTimer.durationSeconds);
       return;
     }
-    const cleared = dayFlowRepository.clear();
+    await idbClearAllStoresExceptBlobs();
+    const cleared = await hybridLocalRepository.clearAsync();
+    preferencesStore.clearAll();
+    publishSyncEvent('storage_reset');
+    isApplyingRemoteSyncRef.current = true;
     setState(cleared);
     setRemainingSeconds(cleared.activeTimer.durationSeconds);
   }, [authStatus, user, reminderScopeKey]);
@@ -2349,7 +2509,9 @@ export const DayFlowProvider: React.FC<{ children: React.ReactNode }> = ({ child
     openCapturePdfImport,
     updateSettings,
     exportBackup,
+    exportFullBackup,
     importBackup,
+    importFullBackup,
     clearAllData,
   };
 

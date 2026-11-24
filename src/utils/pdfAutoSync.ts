@@ -5,6 +5,7 @@ import type {
   PdfDailyPlanItem,
   PdfDeadlineItem,
   PdfMonthlyGoalItem,
+  PdfRoadmapMilestoneItem,
   PdfTimetableDiff,
   PdfWeeklyPlanItem,
   StructuredPdfPlan,
@@ -129,6 +130,26 @@ export function evaluatePdfAutoSync(input: EvaluatePdfAutoSyncInput): PdfAutoSyn
   const changedTitles: string[] = [];
   const removedTitles: string[] = [];
 
+  // --- 0B. STUDY RESOURCE GUARD ---
+  if (plan.metadata?.isStudyResourceOnly) {
+    return {
+      payload: { sourceFile: plan.fileName },
+      reviewPlan: plan,
+      reviewItems: [],
+      duplicatesSkipped: 0,
+      conflictsCount: 0,
+      readyActivitiesCount: 0,
+      readyTasksCount: 0,
+      readyNotesCount: 0,
+      timetableDiff: {
+        hasPreviousImportFromFile,
+        addedTitles: [],
+        changedTitles: [],
+        removedTitles: [],
+      },
+    };
+  }
+
   // --- 1. VALIDATE & EVALUATE WEEKLY TIMETABLE ---
   const candidateWeeklyItems: PdfWeeklyPlanItem[] = [];
   const validStartDates = plan.weeklyPlans
@@ -138,96 +159,136 @@ export function evaluatePdfAutoSync(input: EvaluatePdfAutoSyncInput): PdfAutoSyn
     .map((w) => w.endDate)
     .filter((d): d is string => isStrictValidISODate(d));
 
-  const batchWeeklyStartDate = validStartDates[0] ?? referenceDateISO;
-  const batchWeeklyEndDate = validEndDates[0] ?? null;
+  const metaStart = isStrictValidISODate(plan.metadata?.suggestedStartDate)
+    ? plan.metadata!.suggestedStartDate!
+    : null;
+  const metaEnd = isStrictValidISODate(plan.metadata?.suggestedEndDate)
+    ? plan.metadata!.suggestedEndDate!
+    : null;
 
-  for (const item of plan.weeklyPlans) {
-    if (!item.included) continue;
-    const title = item.title.trim();
+  const batchWeeklyStartDate = validStartDates[0] ?? metaStart;
+  const batchWeeklyEndDate = validEndDates[0] ?? metaEnd ?? null;
+  const isInferredRange =
+    plan.metadata?.dateRangeProvenance === 'inferred' ||
+    plan.metadata?.dateRangeProvenance === 'suggested';
 
-    if (!title) {
+  const hasAnyIncludedWeekly = plan.weeklyPlans.some((w) => w.included);
+  if (hasAnyIncludedWeekly && !batchWeeklyStartDate) {
+    for (const item of plan.weeklyPlans) {
+      if (!item.included) continue;
       reviewWeeklyIds.add(item.id);
-      reviewItems.push({
-        id: item.id,
-        section: 'weekly',
-        title: 'Untitled timetable slot',
-        reason: 'Missing activity title — enter a name before importing.',
-        sourcePage: item.sourcePage,
-      });
-      continue;
     }
-
-    if (item.weekday < 0 || item.weekday > 6 || !Number.isInteger(item.weekday)) {
+    reviewItems.push({
+      id: 'missing-start-date',
+      section: 'dates',
+      title: 'Start date required',
+      reason: 'Select a start date for this recurring weekly timetable before importing.',
+      sourcePage: 1,
+    });
+  } else if (hasAnyIncludedWeekly && isInferredRange && batchWeeklyStartDate) {
+    for (const item of plan.weeklyPlans) {
+      if (!item.included) continue;
       reviewWeeklyIds.add(item.id);
-      reviewItems.push({
-        id: item.id,
-        section: 'weekly',
-        title,
-        reason: 'Unclear weekday column — confirm which day of the week this occurs.',
-        sourcePage: item.sourcePage,
-      });
-      continue;
     }
+    reviewItems.push({
+      id: 'confirm-inferred-range',
+      section: 'dates',
+      title: 'Confirm suggested date range',
+      reason: `Confirm inferred dates ${batchWeeklyStartDate}${
+        batchWeeklyEndDate ? ` to ${batchWeeklyEndDate}` : ''
+      } (${plan.metadata?.dateRangeLabel ?? 'month-year span'}) before importing.`,
+      sourcePage: 1,
+    });
+  } else {
+    for (const item of plan.weeklyPlans) {
+      if (!item.included) continue;
+      const title = item.title.trim();
 
-    if (!isValidTimeRange(item.startTime, item.endTime)) {
-      reviewWeeklyIds.add(item.id);
-      reviewItems.push({
-        id: item.id,
-        section: 'weekly',
-        title,
-        reason: `Invalid or missing time range (${item.startTime}–${item.endTime}).`,
-        sourcePage: item.sourcePage,
-      });
-      continue;
+      if (!title) {
+        reviewWeeklyIds.add(item.id);
+        reviewItems.push({
+          id: item.id,
+          section: 'weekly',
+          title: 'Untitled timetable slot',
+          reason: 'Missing activity title — enter a name before importing.',
+          sourcePage: item.sourcePage,
+        });
+        continue;
+      }
+
+      if (item.weekday < 0 || item.weekday > 6 || !Number.isInteger(item.weekday)) {
+        reviewWeeklyIds.add(item.id);
+        reviewItems.push({
+          id: item.id,
+          section: 'weekly',
+          title,
+          reason: 'Unclear weekday column — confirm which day of the week this occurs.',
+          sourcePage: item.sourcePage,
+        });
+        continue;
+      }
+
+      if (!isValidTimeRange(item.startTime, item.endTime)) {
+        reviewWeeklyIds.add(item.id);
+        reviewItems.push({
+          id: item.id,
+          section: 'weekly',
+          title,
+          reason: `Invalid or missing time range (${item.startTime}–${item.endTime}).`,
+          sourcePage: item.sourcePage,
+        });
+        continue;
+      }
+
+      if (item.startDate !== null && !isStrictValidISODate(item.startDate)) {
+        reviewWeeklyIds.add(item.id);
+        reviewItems.push({
+          id: item.id,
+          section: 'weekly',
+          title,
+          reason: `Unrecognized start date "${item.startDate}".`,
+          sourcePage: item.sourcePage,
+        });
+        continue;
+      }
+
+      if (item.endDate !== null && !isStrictValidISODate(item.endDate)) {
+        reviewWeeklyIds.add(item.id);
+        reviewItems.push({
+          id: item.id,
+          section: 'weekly',
+          title,
+          reason: `Unrecognized end date "${item.endDate}".`,
+          sourcePage: item.sourcePage,
+        });
+        continue;
+      }
+
+      if (item.provenance !== 'explicit') {
+        reviewWeeklyIds.add(item.id);
+        reviewItems.push({
+          id: item.id,
+          section: 'weekly',
+          title,
+          reason: `Inferred (${item.provenance}) weekly slot — confirm timing before adding.`,
+          sourcePage: item.sourcePage,
+        });
+        continue;
+      }
+
+      candidateWeeklyItems.push(item);
     }
-
-    if (item.startDate !== null && !isStrictValidISODate(item.startDate)) {
-      reviewWeeklyIds.add(item.id);
-      reviewItems.push({
-        id: item.id,
-        section: 'weekly',
-        title,
-        reason: `Unrecognized start date "${item.startDate}".`,
-        sourcePage: item.sourcePage,
-      });
-      continue;
-    }
-
-    if (item.endDate !== null && !isStrictValidISODate(item.endDate)) {
-      reviewWeeklyIds.add(item.id);
-      reviewItems.push({
-        id: item.id,
-        section: 'weekly',
-        title,
-        reason: `Unrecognized end date "${item.endDate}".`,
-        sourcePage: item.sourcePage,
-      });
-      continue;
-    }
-
-    if (item.provenance !== 'explicit') {
-      reviewWeeklyIds.add(item.id);
-      reviewItems.push({
-        id: item.id,
-        section: 'weekly',
-        title,
-        reason: `Inferred (${item.provenance}) weekly slot — confirm timing before adding.`,
-        sourcePage: item.sourcePage,
-      });
-      continue;
-    }
-
-    candidateWeeklyItems.push(item);
   }
 
   // Group candidate explicit weekly entries into compact recurring rules
+  const effectiveWeeklyStartDate = batchWeeklyStartDate ?? referenceDateISO;
   const groupedCandidateRules =
     candidateWeeklyItems.length > 0
       ? groupWeeklyPlansIntoScheduleActivities(candidateWeeklyItems, [], {
           selectedWeekdays: Array.from(new Set(candidateWeeklyItems.map((w) => w.weekday))),
           includeBreaks: false,
           oneDayOnly: false,
-          startDate: batchWeeklyStartDate,
+          startDate: effectiveWeeklyStartDate,
           endDate: batchWeeklyEndDate,
           sourceFile: plan.fileName,
           timeZone,
@@ -292,7 +353,7 @@ export function evaluatePdfAutoSync(input: EvaluatePdfAutoSyncInput): PdfAutoSyn
 
     // Check conflict against existing calendar + already accepted rules in this batch
     const conflictCheckStart =
-      rule.date > batchWeeklyStartDate ? rule.date : batchWeeklyStartDate;
+      rule.date > effectiveWeeklyStartDate ? rule.date : effectiveWeeklyStartDate;
     const ruleConflicts = detectRecurringScheduleConflicts(
       [rule],
       stagedActivities,
@@ -564,6 +625,30 @@ export function evaluatePdfAutoSync(input: EvaluatePdfAutoSyncInput): PdfAutoSyn
     autoMonthlyGoals.push({ ...mg, goals: goalsClean });
   }
 
+  // --- 5. VALIDATE & EVALUATE ROADMAP MILESTONES -> NOTES ---
+  const autoRoadmapMilestones: PdfRoadmapMilestoneItem[] = [];
+  const rawMilestonesList = plan.roadmapMilestones ?? [];
+  const activeMilestones = rawMilestonesList.filter((m) => m.included && m.title.trim());
+  if (activeMilestones.length > 0) {
+    const rmNoteTitle = `${plan.fileName.replace(/\.pdf$/i, '')} — Roadmap Milestones`;
+    const rmFingerprint = computeImportFingerprint(
+      plan.fileName,
+      rmNoteTitle,
+      String(activeMilestones.length),
+      'roadmap-milestones'
+    );
+    const matchesExistingRm = existingNotes.some(
+      (n) =>
+        normalizeTitleKey(n.title) === normalizeTitleKey(rmNoteTitle) &&
+        n.content.includes(activeMilestones[0].title.trim())
+    );
+    if (fingerprintSet.has(rmFingerprint) || matchesExistingRm) {
+      duplicatesSkipped += activeMilestones.length;
+    } else {
+      autoRoadmapMilestones.push(...activeMilestones);
+    }
+  }
+
   const payload: StructuredPdfImportPayload = {
     sourceFile: plan.fileName,
     ...(autoWeeklyItems.length > 0
@@ -574,13 +659,14 @@ export function evaluatePdfAutoSync(input: EvaluatePdfAutoSyncInput): PdfAutoSyn
             selectedWeekdays: Array.from(new Set(autoWeeklyItems.map((w) => w.weekday))),
             includeBreaks: false,
             oneDayOnly: false,
-            startDate: batchWeeklyStartDate,
+            startDate: effectiveWeeklyStartDate,
             endDate: batchWeeklyEndDate,
           },
         }
       : {}),
     ...(autoDailyItems.length > 0 ? { dailyItems: autoDailyItems } : {}),
     ...(autoMonthlyGoals.length > 0 ? { monthlyGoals: autoMonthlyGoals } : {}),
+    ...(autoRoadmapMilestones.length > 0 ? { roadmapMilestones: autoRoadmapMilestones } : {}),
     ...(autoDeadlines.length > 0 ? { deadlines: autoDeadlines } : {}),
   };
 
@@ -603,13 +689,17 @@ export function evaluatePdfAutoSync(input: EvaluatePdfAutoSyncInput): PdfAutoSyn
       ...mg,
       included: !autoMonthlyGoals.some((a) => a.id === mg.id) && mg.included,
     })),
+    roadmapMilestones: rawMilestonesList.map((rm) => ({
+      ...rm,
+      included: !autoRoadmapMilestones.some((a) => a.id === rm.id) && rm.included,
+    })),
   };
 
   const readyWeeklyRulesCount = groupWeeklyPlansIntoScheduleActivities(autoWeeklyItems, [], {
     selectedWeekdays: Array.from(new Set(autoWeeklyItems.map((w) => w.weekday))),
     includeBreaks: false,
     oneDayOnly: false,
-    startDate: batchWeeklyStartDate,
+    startDate: effectiveWeeklyStartDate,
     endDate: batchWeeklyEndDate,
     sourceFile: plan.fileName,
     timeZone,
@@ -623,7 +713,7 @@ export function evaluatePdfAutoSync(input: EvaluatePdfAutoSyncInput): PdfAutoSyn
     conflictsCount,
     readyActivitiesCount: readyWeeklyRulesCount + autoDailyItems.length,
     readyTasksCount: autoDeadlines.length,
-    readyNotesCount: autoMonthlyGoals.length,
+    readyNotesCount: autoMonthlyGoals.length + (autoRoadmapMilestones.length > 0 ? 1 : 0),
     timetableDiff: {
       hasPreviousImportFromFile,
       addedTitles,

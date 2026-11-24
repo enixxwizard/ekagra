@@ -11,6 +11,7 @@ import {
   listLibraryResourcesApi,
   updateLibraryResourceApi,
 } from '../services/libraryService';
+import { subscribeSyncChannel } from '../services/storage/syncChannel';
 import type { LibraryResource, LibraryTopic } from '../types/library';
 
 export const LibraryView: React.FC = () => {
@@ -57,6 +58,9 @@ export const LibraryView: React.FC = () => {
 
   useEffect(() => {
     void loadLibrary();
+    return subscribeSyncChannel(['library', 'storage_reset'], () => {
+      void loadLibrary();
+    });
   }, [loadLibrary]);
 
   const subjects = useMemo(() => {
@@ -97,8 +101,8 @@ export const LibraryView: React.FC = () => {
       setResources((prev) => [created, ...prev.filter((r) => r.id !== created.id)]);
       pushToast({
         type: 'success',
-        title: 'Added to Library',
-        description: created.title,
+        title: 'Resource saved successfully.',
+        description: `${created.title} · Available offline.`,
       });
     },
     [pushToast]
@@ -188,8 +192,8 @@ export const LibraryView: React.FC = () => {
           <h1 className="font-display text-2xl font-semibold tracking-tight text-[var(--df-text)] sm:text-3xl">
             My Library
           </h1>
-          <p className="mt-1 text-sm text-[var(--df-text-muted)]">
-            Everything you&apos;re learning, in one place.
+          <p className="mt-1 text-xs text-[var(--df-text-muted)]">
+            Saved on this device · Available offline · Not automatically backed up to cloud.
           </p>
         </div>
 

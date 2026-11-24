@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { useAuth } from '../../hooks/useAuth';
 import {
-  downloadAuthenticatedLibraryFile,
-  fetchAuthenticatedPdfBytes,
+  downloadLocalLibraryPdf,
+  openLocalPdfForReader,
 } from '../../services/libraryService';
 import type { LibraryResource, LibraryTopic } from '../../types/library';
 import { BiIcon } from '../ui/BiIcon';
@@ -28,8 +27,6 @@ export const PdfBookReader: React.FC<PdfBookReaderProps> = ({
   onUpdateProgress,
   onUpdateTopics,
 }) => {
-  const { status: authStatus, session } = useAuth();
-
   const containerRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -57,12 +54,7 @@ export const PdfBookReader: React.FC<PdfBookReaderProps> = ({
   const [newTopicEndPage, setNewTopicEndPage] = useState('');
   const [savingTopic, setSavingTopic] = useState(false);
 
-  const authCreds = {
-    accessToken: session?.access_token ?? null,
-    isGuest: authStatus === 'guest',
-  };
-
-  // Load original unmodified PDF document cleanly
+  // Load original PDF document lazily via range transport (safe for large PDFs)
   useEffect(() => {
     let cancelled = false;
     let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
@@ -71,10 +63,13 @@ export const PdfBookReader: React.FC<PdfBookReaderProps> = ({
 
     const load = async () => {
       try {
-        const bytes = await fetchAuthenticatedPdfBytes(authCreds, resource.id);
+        const rangeSource = await openLocalPdfForReader(resource.id);
         if (cancelled) return;
         loadingTask = pdfjsLib.getDocument({
-          data: bytes,
+          range: rangeSource.createRangeTransport(),
+          rangeChunkSize: 131072,
+          disableAutoFetch: rangeSource.totalBytes > 16 * 1024 * 1024,
+          disableStream: false,
           useSystemFonts: true,
         });
         const pdf = await loadingTask.promise;
@@ -96,7 +91,7 @@ export const PdfBookReader: React.FC<PdfBookReaderProps> = ({
         if (!cancelled) {
           setLoadingDoc(false);
           setLoadError(
-            err instanceof Error ? err.message : 'Unable to load original PDF.'
+            err instanceof Error ? err.message : 'Unable to open this PDF on this device.'
           );
         }
       }
@@ -442,9 +437,8 @@ export const PdfBookReader: React.FC<PdfBookReaderProps> = ({
           <button
             type="button"
             onClick={() =>
-              void downloadAuthenticatedLibraryFile(
-                authCreds,
-                `/api/library/resources/${encodeURIComponent(resource.id)}/file`,
+              void downloadLocalLibraryPdf(
+                resource.id,
                 resource.originalFileName || `${resource.title}.pdf`
               )
             }

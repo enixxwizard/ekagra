@@ -159,7 +159,16 @@ export const ActivityModal: React.FC<ActivityModalProps> = ({
       setShowAdvanced(false);
     }
     setError('');
-  }, [isOpen, editingActivity, initialDate, initialStartTime, initialEndTime]);
+  }, [
+    isOpen,
+    editingActivity,
+    initialDate,
+    initialStartTime,
+    initialEndTime,
+    initialTitle,
+    initialDescription,
+    initialCategory,
+  ]);
 
   const dayActivities = useMemo(() => {
     return resolveActivitiesForDate(state.activities, date).filter(

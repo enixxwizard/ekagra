@@ -5,14 +5,19 @@ import type { ActivityCategory, ScheduleActivity, TimeFormat } from '../../types
 import type {
   PdfDailyPlanItem,
   PdfDeadlineItem,
-  PdfDocumentType,
   PdfMonthlyGoalItem,
+  PdfRoadmapMilestoneItem,
   PdfWeeklyPlanItem,
   StructuredPdfPlan,
 } from '../../types/pdfSchedule';
 import { formatTimeDisplay, getLocalTimeZoneName, getTodayISO } from '../../utils/dateTime';
 import {
+  evaluateSchedulePdfPlan,
+  formatMinutesAsHoursLabel,
+} from '../../utils/intelligentScheduleValidator';
+import {
   MON_TO_SUN_ORDER,
+  timeToMinutes,
   WEEKDAY_FULL_NAMES,
   WEEKDAY_SHORT_NAMES,
 } from '../../utils/pdfSchemaValidator';
@@ -41,15 +46,9 @@ interface SmartPdfImportPreviewProps {
   timeFormat: TimeFormat;
   onImport: (payload: StructuredPdfImportPayload) => StructuredPdfImportResult;
   onNotify: (msg: { type: 'success' | 'info' | 'warning'; title: string; description?: string }) => void;
+  onOpenCalendar?: () => void;
+  autoSyncedSummary?: string | null;
 }
-
-const DOC_TYPE_LABELS: Record<PdfDocumentType, string> = {
-  daily: 'One-Day Schedule',
-  weekly: 'Recurring Weekly Timetable',
-  monthly: 'Monthly Study Roadmap',
-  deadlines: 'Deadlines & Assignments',
-  mixed: 'Mixed Planning Document',
-};
 
 export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
   plan,
@@ -58,6 +57,8 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
   timeFormat,
   onImport,
   onNotify,
+  onOpenCalendar,
+  autoSyncedSummary,
 }) => {
   const todayISO = getTodayISO();
   const timeZone = getLocalTimeZoneName();
@@ -67,9 +68,11 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
   const [selectedDays, setSelectedDays] = useState<number[]>([1, 2, 3, 4, 5, 6]);
   const [oneDayTarget, setOneDayTarget] = useState<number>(1);
   const [includeBreaks, setIncludeBreaks] = useState<boolean>(false);
-  const [startDate, setStartDate] = useState<string>(todayISO);
+  const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
+  const [dateConfirmedByUser, setDateConfirmedByUser] = useState<boolean>(false);
   const [editingWeeklyId, setEditingWeeklyId] = useState<string | null>(null);
+  const [lastImportResult, setLastImportResult] = useState<StructuredPdfImportResult | null>(null);
   const [importedSections, setImportedSections] = useState<Record<PreviewTab, boolean>>({
     weekly: false,
     daily: false,
@@ -77,30 +80,55 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
     deadlines: false,
   });
 
-  // Sync default active tab & detected weekdays whenever a new plan arrives
+  // Sync defaults whenever a new PDF extraction arrives
   useEffect(() => {
+    const hasMilestones = (plan.roadmapMilestones?.length ?? 0) > 0;
     if (plan.weeklyPlans.length > 0) setActiveTab('weekly');
     else if (plan.dailyPlans.length > 0) setActiveTab('daily');
-    else if (plan.monthlyGoals.length > 0) setActiveTab('monthly');
+    else if (plan.monthlyGoals.length > 0 || hasMilestones) setActiveTab('monthly');
     else if (plan.deadlines.length > 0) setActiveTab('deadlines');
     else setActiveTab('weekly');
 
-    const detectedDays = Array.from(new Set(plan.weeklyPlans.map((w) => w.weekday)));
-    if (detectedDays.length > 0) {
-      setSelectedDays(detectedDays);
-      setOneDayTarget(detectedDays.includes(1) ? 1 : detectedDays[0]);
+    const detectedDays = Array.from(
+      new Set(plan.weeklyPlans.filter((w) => w.included).map((w) => w.weekday))
+    );
+    const fallbackDays = Array.from(new Set(plan.weeklyPlans.map((w) => w.weekday)));
+    const initialDays = detectedDays.length > 0 ? detectedDays : fallbackDays;
+    if (initialDays.length > 0) {
+      setSelectedDays(initialDays);
+      setOneDayTarget(initialDays.includes(1) ? 1 : initialDays[0]);
     } else {
       setSelectedDays([1, 2, 3, 4, 5, 6]);
     }
 
-    const firstStart = plan.weeklyPlans.find((w) => w.startDate)?.startDate;
-    const firstEnd = plan.weeklyPlans.find((w) => w.endDate)?.endDate;
-    setStartDate(firstStart ?? todayISO);
-    setEndDate(firstEnd ?? '');
+    const firstStart =
+      plan.metadata?.suggestedStartDate ??
+      plan.weeklyPlans.find((w) => w.startDate)?.startDate ??
+      plan.dailyPlans.find((d) => d.date)?.date ??
+      '';
+    const firstEnd =
+      plan.metadata?.suggestedEndDate ??
+      plan.weeklyPlans.find((w) => w.endDate)?.endDate ??
+      '';
+
+    setStartDate(firstStart);
+    setEndDate(firstEnd);
+    setDateConfirmedByUser(plan.metadata?.dateRangeProvenance === 'explicit');
     setScopeMode('full');
     setEditingWeeklyId(null);
+    setLastImportResult(null);
     setImportedSections({ weekly: false, daily: false, monthly: false, deadlines: false });
-  }, [plan.documentHash, plan.analysisSource, todayISO]);
+  }, [plan.documentHash, plan.analysisSource]);
+
+  const evaluation = useMemo(() => {
+    return evaluateSchedulePdfPlan(plan, {
+      existingActivities,
+      overrideStartDate: startDate || null,
+      overrideEndDate: endDate || null,
+      referenceDateISO: todayISO,
+      dateConfirmedByUser,
+    });
+  }, [plan, existingActivities, startDate, endDate, todayISO, dateConfirmedByUser]);
 
   const effectiveSelectedWeekdays = useMemo(() => {
     if (scopeMode === 'one_day') {
@@ -115,12 +143,25 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
     return selectedDays;
   }, [scopeMode, oneDayTarget, plan.weeklyPlans, selectedDays]);
 
+  const weeklySelectedMinutes = useMemo(() => {
+    const allowed = new Set(effectiveSelectedWeekdays);
+    let total = 0;
+    for (const item of plan.weeklyPlans) {
+      if (!item.included || !allowed.has(item.weekday)) continue;
+      if (scopeMode === 'one_day' && item.weekday !== oneDayTarget) continue;
+      const diff = timeToMinutes(item.endTime) - timeToMinutes(item.startTime);
+      if (diff > 0) total += diff;
+    }
+    return total;
+  }, [plan.weeklyPlans, effectiveSelectedWeekdays, scopeMode, oneDayTarget]);
+
   const previewGroupedRules = useMemo(() => {
+    const effectiveStart = startDate || todayISO;
     return groupWeeklyPlansIntoScheduleActivities(plan.weeklyPlans, plan.breakPeriods, {
       selectedWeekdays: effectiveSelectedWeekdays,
       includeBreaks,
       oneDayOnly: scopeMode === 'one_day',
-      startDate: startDate || todayISO,
+      startDate: effectiveStart,
       endDate: endDate || null,
       sourceFile: plan.fileName,
       timeZone,
@@ -139,13 +180,13 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
   ]);
 
   const weeklyConflicts = useMemo(() => {
-    if (previewGroupedRules.length === 0) return [];
+    if (previewGroupedRules.length === 0 || !startDate) return [];
     return detectRecurringScheduleConflicts(
       previewGroupedRules,
       existingActivities,
-      startDate || todayISO
+      startDate
     );
-  }, [previewGroupedRules, existingActivities, startDate, todayISO]);
+  }, [previewGroupedRules, existingActivities, startDate]);
 
   const updateWeeklyItem = (id: string, patch: Partial<PdfWeeklyPlanItem>) => {
     onUpdatePlan((prev) => ({
@@ -174,6 +215,15 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
     }));
   };
 
+  const updateMilestoneItem = (id: string, patch: Partial<PdfRoadmapMilestoneItem>) => {
+    onUpdatePlan((prev) => ({
+      ...prev,
+      roadmapMilestones: (prev.roadmapMilestones ?? []).map((item) =>
+        item.id === id ? { ...item, ...patch } : item
+      ),
+    }));
+  };
+
   const updateDeadlineItem = (id: string, patch: Partial<PdfDeadlineItem>) => {
     onUpdatePlan((prev) => ({
       ...prev,
@@ -197,6 +247,14 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
   };
 
   const handleImportWeekly = () => {
+    if (!startDate) {
+      onNotify({
+        type: 'warning',
+        title: 'Start date required.',
+        description: 'Select a start date before importing this recurring weekly timetable.',
+      });
+      return;
+    }
     if (previewGroupedRules.length === 0) {
       onNotify({
         type: 'info',
@@ -206,6 +264,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
       return;
     }
 
+    setDateConfirmedByUser(true);
     const res = onImport({
       sourceFile: plan.fileName,
       weekly: {
@@ -214,23 +273,27 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
         selectedWeekdays: effectiveSelectedWeekdays,
         includeBreaks,
         oneDayOnly: scopeMode === 'one_day',
-        startDate: startDate || todayISO,
+        startDate,
         endDate: endDate || null,
       },
     });
 
+    setLastImportResult(res);
     setImportedSections((prev) => ({ ...prev, weekly: true }));
     onNotify({
       type: res.conflictsCount > 0 ? 'warning' : 'success',
-      title: `Imported ${res.activitiesAdded} ${
-        res.recurringRulesAdded > 0 ? 'recurring rule' : 'schedule block'
-      }${res.activitiesAdded === 1 ? '' : 's'}`,
+      title:
+        res.activitiesAdded > 0
+          ? `Imported ${res.activitiesAdded} ${
+              res.recurringRulesAdded > 0 ? 'recurring rule' : 'schedule block'
+            }${res.activitiesAdded === 1 ? '' : 's'}`
+          : 'No new recurring rules added',
       description: [
         res.skippedDuplicates > 0 ? `${res.skippedDuplicates} duplicate skipped` : null,
         res.conflictsCount > 0 ? `${res.conflictsCount} overlap with existing schedule` : null,
       ]
         .filter(Boolean)
-        .join(' · ') || 'Your weekly timetable is now active in Plan & Calendar.',
+        .join(' · ') || 'Your weekly timetable is now active across Calendar, Plan, Focus & Reminders.',
     });
   };
 
@@ -240,10 +303,24 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
       onNotify({ type: 'info', title: 'Select at least one daily activity.' });
       return;
     }
+    const normalizedDaily = selected.map((d) => ({
+      ...d,
+      date: d.date ?? (startDate || null),
+    }));
+    if (normalizedDaily.some((d) => !d.date)) {
+      onNotify({
+        type: 'warning',
+        title: 'Start date required.',
+        description: 'Choose a date for undated daily study blocks before importing.',
+      });
+      return;
+    }
+
     const res = onImport({
       sourceFile: plan.fileName,
-      dailyItems: selected,
+      dailyItems: normalizedDaily,
     });
+    setLastImportResult(res);
     setImportedSections((prev) => ({ ...prev, daily: true }));
     onNotify({
       type: res.conflictsCount > 0 ? 'warning' : 'success',
@@ -256,20 +333,23 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
   };
 
   const handleImportMonthly = () => {
-    const selected = plan.monthlyGoals.filter((m) => m.included && m.goals.length > 0);
-    if (selected.length === 0) {
-      onNotify({ type: 'info', title: 'Select at least one monthly roadmap card.' });
+    const selectedMonthly = plan.monthlyGoals.filter((m) => m.included && m.goals.length > 0);
+    const selectedMilestones = (plan.roadmapMilestones ?? []).filter((m) => m.included && m.title.trim());
+    if (selectedMonthly.length === 0 && selectedMilestones.length === 0) {
+      onNotify({ type: 'info', title: 'Select at least one roadmap goal or milestone.' });
       return;
     }
     const res = onImport({
       sourceFile: plan.fileName,
-      monthlyGoals: selected,
+      monthlyGoals: selectedMonthly,
+      roadmapMilestones: selectedMilestones,
     });
+    setLastImportResult(res);
     setImportedSections((prev) => ({ ...prev, monthly: true }));
     onNotify({
       type: 'success',
-      title: `Saved ${res.notesAdded} monthly roadmap ${res.notesAdded === 1 ? 'note' : 'notes'}`,
-      description: 'Stored in Capture Notes & Quotes without creating fake daily events.',
+      title: `Saved ${res.notesAdded} roadmap ${res.notesAdded === 1 ? 'note' : 'notes'}`,
+      description: 'Saved as structured roadmap goals & milestones without inventing fake daily sessions.',
     });
   };
 
@@ -283,11 +363,79 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
       sourceFile: plan.fileName,
       deadlines: selected,
     });
+    setLastImportResult(res);
     setImportedSections((prev) => ({ ...prev, deadlines: true }));
     onNotify({
       type: 'success',
       title: `Added ${res.tasksAdded} deadline ${res.tasksAdded === 1 ? 'task' : 'tasks'}`,
       description: 'Added to your Tasks backlog with original due dates preserved.',
+    });
+  };
+
+  const handleSyncAllSections = () => {
+    const hasWeeklyItems = previewGroupedRules.length > 0;
+    const selectedDaily = plan.dailyPlans
+      .filter((d) => d.included)
+      .map((d) => ({ ...d, date: d.date ?? (startDate || null) }));
+    const hasUndatedDaily = selectedDaily.some((d) => !d.date);
+
+    if ((hasWeeklyItems && !startDate) || hasUndatedDaily) {
+      onNotify({
+        type: 'warning',
+        title: 'Start date required.',
+        description: 'Select a valid Start date before syncing this schedule.',
+      });
+      return;
+    }
+
+    const selectedMonthly = plan.monthlyGoals.filter((m) => m.included && m.goals.length > 0);
+    const selectedMilestones = (plan.roadmapMilestones ?? []).filter((m) => m.included && m.title.trim());
+    const selectedDeadlines = plan.deadlines.filter((dl) => dl.included);
+
+    setDateConfirmedByUser(true);
+    const res = onImport({
+      sourceFile: plan.fileName,
+      ...(hasWeeklyItems
+        ? {
+            weekly: {
+              items: plan.weeklyPlans,
+              breakPeriods: plan.breakPeriods,
+              selectedWeekdays: effectiveSelectedWeekdays,
+              includeBreaks,
+              oneDayOnly: scopeMode === 'one_day',
+              startDate,
+              endDate: endDate || null,
+            },
+          }
+        : {}),
+      ...(selectedDaily.length > 0 ? { dailyItems: selectedDaily } : {}),
+      ...(selectedMonthly.length > 0 ? { monthlyGoals: selectedMonthly } : {}),
+      ...(selectedMilestones.length > 0 ? { roadmapMilestones: selectedMilestones } : {}),
+      ...(selectedDeadlines.length > 0 ? { deadlines: selectedDeadlines } : {}),
+    });
+
+    setLastImportResult(res);
+    setImportedSections({
+      weekly: hasWeeklyItems,
+      daily: selectedDaily.length > 0,
+      monthly: selectedMonthly.length > 0 || selectedMilestones.length > 0,
+      deadlines: selectedDeadlines.length > 0,
+    });
+
+    const totalAdded = res.activitiesAdded + res.tasksAdded + res.notesAdded;
+    onNotify({
+      type: res.conflictsCount > 0 ? 'warning' : totalAdded > 0 ? 'success' : 'info',
+      title:
+        totalAdded > 0
+          ? `Synced schedule (${res.activitiesAdded} activities, ${res.notesAdded} roadmap notes, ${res.tasksAdded} deadlines)`
+          : 'Already up to date',
+      description:
+        [
+          res.skippedDuplicates > 0 ? `${res.skippedDuplicates} duplicates skipped` : null,
+          res.conflictsCount > 0 ? `${res.conflictsCount} scheduling conflicts preserved for review` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ') || 'Calendar, Plan Dashboard, Focus Mode, and Reminders refreshed immediately.',
     });
   };
 
@@ -297,6 +445,23 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
       : plan.analysisSource === 'gemini'
       ? 'Gemini AI'
       : 'Local table parser';
+
+  const statusTone =
+    evaluation.statusCode === 'conflicts_detected' || evaluation.statusCode === 'start_date_required'
+      ? 'border-amber-300 bg-amber-50/70 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300'
+      : evaluation.statusCode === 'clarification_required'
+      ? 'border-sky-300 bg-sky-50/70 text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-300'
+      : 'border-[var(--df-accent-border)] bg-[var(--df-accent-soft)] text-[var(--df-accent-soft-fg)]';
+
+  const sundayPolicyLabel =
+    plan.metadata?.sundayPolicy === 'rest'
+      ? 'Sunday: Rest'
+      : plan.metadata?.sundayPolicy === 'optional_review'
+      ? 'Sunday: Optional review'
+      : null;
+
+  const milestonesList = plan.roadmapMilestones ?? [];
+  const roadmapCount = plan.monthlyGoals.length + milestonesList.length;
 
   const tabs: Array<{ id: PreviewTab; label: string; count: number; icon: React.ReactNode }> = [
     {
@@ -313,8 +478,8 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
     },
     {
       id: 'monthly',
-      label: 'Monthly Goals',
-      count: plan.monthlyGoals.length,
+      label: 'Roadmap & Months',
+      count: roadmapCount,
       icon: <BiIcon name="bullseye" className="text-xs" />,
     },
     {
@@ -325,42 +490,174 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
     },
   ];
 
+  const weekdayLabel =
+    effectiveSelectedWeekdays.length > 0
+      ? effectiveSelectedWeekdays
+          .slice()
+          .sort((a, b) => (a === 0 ? 7 : a) - (b === 0 ? 7 : b))
+          .map((d) => WEEKDAY_SHORT_NAMES[d])
+          .join(', ')
+      : 'None';
+
   return (
     <section className="space-y-4 rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">
-      {/* Classification Header */}
-      <div className="flex flex-col justify-between gap-3 border-b border-[var(--df-border)] pb-4 sm:flex-row sm:items-center">
-        <div className="space-y-1">
+      {/* Document & Status Header */}
+      <div className="flex flex-col justify-between gap-3 border-b border-[var(--df-border)] pb-4 sm:flex-row sm:items-start">
+        <div className="space-y-1.5">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-display text-lg font-bold text-[var(--df-text)]">
-              Smart Schedule Review
+              {plan.fileName}
             </h3>
-            <span className="rounded-lg bg-[var(--df-accent-soft)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--df-accent-soft-fg)]">
-              {DOC_TYPE_LABELS[plan.documentType]}
+            <span className={`rounded-lg border px-2.5 py-0.5 text-[11px] font-semibold ${statusTone}`}>
+              {evaluation.statusMessage}
             </span>
-            <span className="inline-flex items-center gap-1 rounded-lg bg-[var(--df-surface-subtle)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--df-text)]">
+            <span className="rounded-lg bg-[var(--df-surface-subtle)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--df-text)]">
+              {evaluation.scheduleTypeLabel}
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-lg bg-[var(--df-surface-subtle)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--df-text-muted)]">
               {plan.analysisSource !== 'local' && <BiIcon name="stars" className="text-[11px]" />}
               {sourceBadge}
               {plan.cached ? ' · Cached' : ''}
             </span>
           </div>
           <p className="text-xs text-[var(--df-text-muted)]">
-            Timezone: {timeZone} · Weekly timetables save as compact recurring rules instead of repeated daily duplicates.
+            Timezone: {timeZone} · Weekly timetables save as compact recurring rules instead of repeated daily copies.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onOpenCalendar && (lastImportResult || autoSyncedSummary) && (
+            <button
+              type="button"
+              onClick={onOpenCalendar}
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--df-border-strong)] bg-[var(--df-bg)] px-3.5 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-accent)]"
+            >
+              <BiIcon name="calendar3" className="text-xs" />
+              Open Calendar
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleSyncAllSections}
+            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] hover:brightness-95"
+          >
+            <BiIcon name="check2-all" className="text-sm" />
+            {dateConfirmedByUser || !evaluation.hasInferredDates
+              ? 'Confirm & Sync Schedule'
+              : 'Confirm Dates & Sync'}
+          </button>
+        </div>
+      </div>
+
+      {/* Auto-sync / Last Import Banner */}
+      {(autoSyncedSummary || lastImportResult) && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-[var(--df-accent-border)] bg-[var(--df-accent-soft)] px-4 py-2.5 text-xs text-[var(--df-accent-soft-fg)]">
+          <div className="flex items-center gap-2 font-semibold">
+            <BiIcon name="check-circle-fill" className="text-sm shrink-0" />
+            <span>
+              {autoSyncedSummary ??
+                `Synced ${lastImportResult!.activitiesAdded} activities (${lastImportResult!.recurringRulesAdded} recurring), ${lastImportResult!.notesAdded} roadmap notes, ${lastImportResult!.tasksAdded} deadlines.`}
+            </span>
+          </div>
+          {lastImportResult && lastImportResult.skippedDuplicates > 0 && (
+            <span className="font-mono text-[11px]">
+              {lastImportResult.skippedDuplicates} duplicates skipped
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Structured Schedule Overview Metrics */}
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+            Start Date
+          </p>
+          <p className="mt-1 font-mono text-xs font-bold text-[var(--df-text)]">
+            {startDate || 'Not set'}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+            End Date
+          </p>
+          <p className="mt-1 font-mono text-xs font-bold text-[var(--df-text)]">
+            {endDate || 'Ongoing'}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+            Weekdays
+          </p>
+          <p className="mt-1 truncate text-xs font-bold text-[var(--df-text)]" title={weekdayLabel}>
+            {weekdayLabel}
+          </p>
+          {sundayPolicyLabel && (
+            <p className="mt-0.5 text-[10px] text-[var(--df-text-muted)]">{sundayPolicyLabel}</p>
+          )}
+        </div>
+        <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+            Weekly Study Hours
+          </p>
+          <p className="mt-1 font-mono text-xs font-bold text-[var(--df-text)]">
+            {formatMinutesAsHoursLabel(weeklySelectedMinutes)}
+          </p>
+          {evaluation.optionalWeeklyMinutes > 0 && (
+            <p className="mt-0.5 text-[10px] text-[var(--df-text-muted)]">
+              +{formatMinutesAsHoursLabel(evaluation.optionalWeeklyMinutes)} optional
+            </p>
+          )}
+        </div>
+        <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+            Break Periods
+          </p>
+          <p className="mt-1 font-mono text-xs font-bold text-[var(--df-text)]">
+            {plan.breakPeriods.length}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+            Conflicts
+          </p>
+          <p
+            className={`mt-1 font-mono text-xs font-bold ${
+              evaluation.conflictsCount > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-[var(--df-text)]'
+            }`}
+          >
+            {evaluation.conflictsCount}
           </p>
         </div>
       </div>
 
-      {/* Phase 6 AI Validation & Review Warnings */}
-      {plan.warnings.length > 0 && (
+      {/* Missing Info / Clarification / Conflicts Callout */}
+      {(evaluation.missingInformation.length > 0 ||
+        evaluation.clarificationReasons.length > 0 ||
+        evaluation.conflictMessages.length > 0 ||
+        plan.warnings.length > 0) && (
         <div
           role="status"
-          className="space-y-1.5 rounded-2xl border border-amber-200 bg-amber-50/70 p-3.5 dark:border-amber-900/50 dark:bg-amber-950/25"
+          className="space-y-2 rounded-2xl border border-amber-200 bg-amber-50/70 p-3.5 dark:border-amber-900/50 dark:bg-amber-950/25"
         >
           <div className="flex items-center gap-2 text-xs font-semibold text-amber-800 dark:text-amber-300">
             <BiIcon name="exclamation-triangle" className="text-sm shrink-0" />
-            Please review {plan.warnings.length} extraction{' '}
-            {plan.warnings.length === 1 ? 'note' : 'notes'} before importing
+            <span>
+              {evaluation.statusMessage} Review details below before syncing:
+            </span>
           </div>
           <ul className="space-y-1 pl-6 text-xs text-[var(--df-text-muted)] list-disc">
+            {evaluation.missingInformation.map((m, i) => (
+              <li key={`miss-${i}`}>{m}</li>
+            ))}
+            {evaluation.clarificationReasons.map((c, i) => (
+              <li key={`clar-${i}`}>{c}</li>
+            ))}
+            {evaluation.conflictMessages.map((msg, i) => (
+              <li key={`conf-${i}`} className="font-medium text-amber-800 dark:text-amber-300">
+                {msg}
+              </li>
+            ))}
             {plan.warnings.map((w) => (
               <li key={w.id}>
                 {w.message}
@@ -402,16 +699,15 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
         })}
       </div>
 
-      {/* TAB 1: WEEKLY PLAN (Monday–Sunday Timetable) */}
+      {/* TAB 1: WEEKLY PLAN */}
       {activeTab === 'weekly' && (
         <div className="space-y-4">
           {plan.weeklyPlans.length === 0 && plan.breakPeriods.length === 0 ? (
             <p className="py-8 text-center text-xs text-[var(--df-text-muted)]">
-              No recurring weekly timetable detected. Check the Daily Plan, Monthly Goals, or Deadlines tabs, or click &ldquo;Enhance with Gemini AI&rdquo; above.
+              No recurring weekly timetable detected. Check Daily Plan, Roadmap &amp; Months, or Deadlines tabs.
             </p>
           ) : (
             <>
-              {/* Weekly Import Controls */}
               <div className="grid grid-cols-1 gap-3 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-4 lg:grid-cols-12">
                 <div className="space-y-2 lg:col-span-7">
                   <div className="flex flex-wrap items-center gap-2">
@@ -476,13 +772,21 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                 <div className="grid grid-cols-2 gap-2.5 lg:col-span-5 lg:self-start">
                   <div>
                     <label className="block text-[11px] font-medium text-[var(--df-text-muted)]">
-                      Starts on
+                      Starts on {!startDate && <span className="text-amber-600">*required</span>}
                     </label>
                     <input
                       type="date"
+                      aria-label="Schedule start date"
                       value={startDate}
-                      onChange={(e) => setStartDate(e.target.value)}
-                      className="mt-1 w-full rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-2 font-mono text-xs text-[var(--df-text)]"
+                      onChange={(e) => {
+                        setStartDate(e.target.value);
+                        if (e.target.value) setDateConfirmedByUser(true);
+                      }}
+                      className={`mt-1 w-full rounded-xl border bg-[var(--df-surface)] px-2.5 py-2 font-mono text-xs text-[var(--df-text)] ${
+                        !startDate
+                          ? 'border-amber-400 ring-1 ring-amber-400/50'
+                          : 'border-[var(--df-border)]'
+                      }`}
                     />
                   </div>
                   <div>
@@ -491,9 +795,13 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                     </label>
                     <input
                       type="date"
+                      aria-label="Schedule end date"
                       value={endDate}
                       disabled={scopeMode === 'one_day'}
-                      onChange={(e) => setEndDate(e.target.value)}
+                      onChange={(e) => {
+                        setEndDate(e.target.value);
+                        setDateConfirmedByUser(true);
+                      }}
                       className="mt-1 w-full rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-2 font-mono text-xs text-[var(--df-text)] disabled:opacity-50"
                     />
                   </div>
@@ -520,7 +828,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                     <div
                       key={dayNum}
                       className={`flex flex-col rounded-2xl border p-2.5 transition-opacity ${
-                        isDaySelected
+                        isDaySelected || dayNum === 0
                           ? 'border-[var(--df-border)] bg-[var(--df-bg)]'
                           : 'border-[var(--df-border)] bg-[var(--df-bg)] opacity-50'
                       }`}
@@ -535,7 +843,11 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                       </div>
 
                       {combined.length === 0 ? (
-                        <p className="py-4 text-center text-[11px] text-[var(--df-text-subtle)]">Rest / open</p>
+                        <p className="py-4 text-center text-[11px] text-[var(--df-text-subtle)]">
+                          {dayNum === 0 && plan.metadata?.sundayPolicy === 'optional_review'
+                            ? 'Optional review'
+                            : 'Rest / open'}
+                        </p>
                       ) : (
                         <div className="space-y-1.5">
                           {combined.map((entry) => {
@@ -570,7 +882,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                                 className={`rounded-xl border p-2 text-xs transition-colors ${
                                   item.included
                                     ? 'border-[var(--df-border)] bg-[var(--df-surface)]'
-                                    : 'border-dashed border-[var(--df-border-strong)] bg-[var(--df-surface)] opacity-55'
+                                    : 'border-dashed border-[var(--df-border-strong)] bg-[var(--df-surface)] opacity-60'
                                 }`}
                               >
                                 {isEditing ? (
@@ -654,7 +966,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                                         onClick={() =>
                                           updateWeeklyItem(item.id, { included: !item.included })
                                         }
-                                        title={item.included ? 'Exclude slot' : 'Restore slot'}
+                                        title={item.included ? 'Exclude slot' : 'Include slot'}
                                         className="shrink-0 rounded p-0.5 text-[var(--df-text-muted)] hover:text-[var(--df-text)]"
                                       >
                                         {item.included ? (
@@ -677,11 +989,23 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                                         <BiIcon name="pencil" className="text-[10px]" />
                                       </button>
                                     </div>
-                                    {item.provenance !== 'explicit' && (
-                                      <span className="mt-1 inline-block rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
-                                        {item.provenance}
-                                      </span>
-                                    )}
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                      {item.optional && (
+                                        <span className="inline-block rounded bg-[var(--df-surface-subtle)] px-1 py-0.5 text-[9px] font-medium text-[var(--df-text-muted)]">
+                                          Optional
+                                        </span>
+                                      )}
+                                      {item.monthlyOverrides && item.monthlyOverrides.length > 0 && (
+                                        <span className="inline-block rounded bg-[var(--df-accent-soft)] px-1 py-0.5 text-[9px] font-medium text-[var(--df-accent-soft-fg)]">
+                                          Monthly focus ({item.monthlyOverrides.length}mo)
+                                        </span>
+                                      )}
+                                      {item.provenance !== 'explicit' && (
+                                        <span className="inline-block rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                                          {item.provenance}
+                                        </span>
+                                      )}
+                                    </div>
                                   </>
                                 )}
                               </div>
@@ -720,7 +1044,7 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                 <button
                   type="button"
                   onClick={handleImportWeekly}
-                  disabled={previewGroupedRules.length === 0}
+                  disabled={previewGroupedRules.length === 0 || !startDate}
                   className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-5 text-xs font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 disabled:opacity-50 whitespace-nowrap shrink-0"
                 >
                   <BiIcon name="check-lg" className="text-xs" />
@@ -741,13 +1065,13 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
         <div className="space-y-3">
           {plan.dailyPlans.length === 0 ? (
             <p className="py-8 text-center text-xs text-[var(--df-text-muted)]">
-              No standalone single-date daily events found in this document.
+              No standalone daily study blocks found in this document.
             </p>
           ) : (
             <>
               <div className="flex items-center justify-between gap-3">
                 <p className="text-xs text-[var(--df-text-muted)]">
-                  Specific calendar-date sessions. Unstated dates default to today when imported unless edited.
+                  Dated or routine study blocks. Undated blocks require picking a date before importing.
                 </p>
                 <button
                   type="button"
@@ -778,17 +1102,17 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                         className="min-w-[180px] flex-1 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-sm font-semibold text-[var(--df-text)] focus:border-[var(--df-border-strong)] focus:bg-[var(--df-surface)]"
                       />
                       <span className="text-[11px] text-[var(--df-text-muted)]">
-                        p. {item.sourcePage} · {item.date ? `Date: ${item.dateProvenance}` : 'No date stated'}
+                        p. {item.sourcePage} · {item.date ? `Date: ${item.dateProvenance}` : 'Select date'}
                       </span>
                     </div>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                       <input
                         type="date"
-                        value={item.date ?? todayISO}
+                        value={item.date ?? startDate ?? ''}
                         onChange={(e) =>
                           updateDailyItem(item.id, {
-                            date: e.target.value,
-                            dateProvenance: 'explicit',
+                            date: e.target.value || null,
+                            dateProvenance: e.target.value ? 'explicit' : 'suggested',
                           })
                         }
                         className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1.5 font-mono text-xs text-[var(--df-text)]"
@@ -829,18 +1153,18 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
         </div>
       )}
 
-      {/* TAB 3: MONTHLY GOALS */}
+      {/* TAB 3: ROADMAP & MONTHS */}
       {activeTab === 'monthly' && (
-        <div className="space-y-3">
-          {plan.monthlyGoals.length === 0 ? (
+        <div className="space-y-4">
+          {roadmapCount === 0 ? (
             <p className="py-8 text-center text-xs text-[var(--df-text-muted)]">
-              No monthly learning goals or roadmap priorities detected in this document.
+              No monthly goals or roadmap milestones detected in this document.
             </p>
           ) : (
             <>
               <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
                 <p className="text-xs text-[var(--df-text-muted)]">
-                  Monthly objectives stay as high-level Capture notes—no arbitrary daily calendar slots are invented.
+                  Monthly technical goals &amp; roadmap milestones save cleanly without inventing fake daily calendar sessions.
                 </p>
                 <button
                   type="button"
@@ -848,50 +1172,96 @@ export const SmartPdfImportPreview: React.FC<SmartPdfImportPreviewProps> = ({
                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-accent)] px-4 text-xs font-semibold text-[var(--df-accent-fg)] whitespace-nowrap shrink-0"
                 >
                   <BiIcon name="journal-text" className="text-xs" />
-                  {importedSections.monthly ? 'Saved to Notes' : 'Save Selected to Notes'}
+                  {importedSections.monthly ? 'Saved Roadmap Notes' : 'Save Roadmap to Notes'}
                 </button>
               </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                {plan.monthlyGoals.map((mg) => (
-                  <div
-                    key={mg.id}
-                    className="space-y-2.5 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-4"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <label className="inline-flex items-center gap-2 text-sm font-bold text-[var(--df-text)]">
+
+              {plan.monthlyGoals.length > 0 && (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {plan.monthlyGoals.map((mg) => (
+                    <div
+                      key={mg.id}
+                      className="space-y-2.5 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-4"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="inline-flex items-center gap-2 text-sm font-bold text-[var(--df-text)]">
+                          <input
+                            type="checkbox"
+                            checked={mg.included}
+                            onChange={(e) =>
+                              updateMonthlyGoal(mg.id, { included: e.target.checked })
+                            }
+                            className="h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+                          />
+                          <span>
+                            {mg.monthLabel}
+                            {mg.year ? ` ${mg.year}` : ''}
+                          </span>
+                        </label>
+                        <span className="text-[11px] text-[var(--df-text-muted)]">
+                          p. {mg.sourcePage} · {mg.category}
+                        </span>
+                      </div>
+                      <textarea
+                        rows={3}
+                        value={mg.goals.join('\n')}
+                        onChange={(e) =>
+                          updateMonthlyGoal(mg.id, {
+                            goals: e.target.value
+                              .split('\n')
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                        className="w-full rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] p-2.5 text-xs leading-relaxed text-[var(--df-text)]"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {milestonesList.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-bold uppercase tracking-wide text-[var(--df-text-muted)]">
+                    Roadmap Milestones ({milestonesList.length})
+                  </h4>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {milestonesList.map((rm) => (
+                      <div
+                        key={rm.id}
+                        className="flex items-start gap-2.5 rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3"
+                      >
                         <input
                           type="checkbox"
-                          checked={mg.included}
+                          checked={rm.included}
                           onChange={(e) =>
-                            updateMonthlyGoal(mg.id, { included: e.target.checked })
+                            updateMilestoneItem(rm.id, { included: e.target.checked })
                           }
-                          className="h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
+                          className="mt-1 h-4 w-4 rounded border-[var(--df-border-strong)] accent-[var(--df-accent)]"
                         />
-                        <span>
-                          {mg.monthLabel}
-                          {mg.year ? ` ${mg.year}` : ''}
-                        </span>
-                      </label>
-                      <span className="text-[11px] text-[var(--df-text-muted)]">
-                        p. {mg.sourcePage} · {mg.category}
-                      </span>
-                    </div>
-                    <textarea
-                      rows={3}
-                      value={mg.goals.join('\n')}
-                      onChange={(e) =>
-                        updateMonthlyGoal(mg.id, {
-                          goals: e.target.value
-                            .split('\n')
-                            .map((s) => s.trim())
-                            .filter(Boolean),
-                        })
-                      }
-                      className="w-full rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] p-2.5 text-xs leading-relaxed text-[var(--df-text)]"
-                    />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="rounded bg-[var(--df-accent-soft)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--df-accent-soft-fg)]">
+                              {rm.phaseLabel}
+                            </span>
+                            <span className="text-[10px] text-[var(--df-text-muted)]">
+                              p. {rm.sourcePage}
+                            </span>
+                          </div>
+                          <input
+                            type="text"
+                            value={rm.title}
+                            onChange={(e) =>
+                              updateMilestoneItem(rm.id, { title: e.target.value })
+                            }
+                            className="mt-1.5 w-full rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-xs font-semibold text-[var(--df-text)] focus:border-[var(--df-border-strong)] focus:bg-[var(--df-surface)]"
+                          />
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              )}
             </>
           )}
         </div>

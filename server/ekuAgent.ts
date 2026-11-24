@@ -1,3 +1,4 @@
+import { type FunctionDeclaration, Type } from '@google/genai';
 import { format, parseISO } from 'date-fns';
 import type { ActivityCategory, FocusModeType, PriorityLevel, ScheduleActivity, TaskItem } from '../src/types/dayflow';
 import type {
@@ -28,6 +29,7 @@ import {
   validateSingleChangeCandidate,
 } from '../src/utils/scheduleEngine';
 import { detectConflicts } from '../src/utils/scheduler';
+import { classifyGeminiHttpError, runGeminiFunctionCallingLoop } from './aiBrain';
 import { executeResourceSearch, normalizeLanguageName } from './ekuSearch';
 
 const ALLOWED_CATEGORIES = new Set<ActivityCategory>([
@@ -48,36 +50,6 @@ const ALLOWED_FREQUENCIES = new Set([
   'weekly',
   'custom_weekdays',
 ]);
-
-interface OpenAIResponsesToolCall {
-  type: 'function_call';
-  id?: string;
-  call_id: string;
-  name: string;
-  arguments: string;
-}
-
-interface OpenAIResponsesOutputMessage {
-  type: 'message';
-  content?: Array<{ type?: string; text?: string }>;
-}
-
-interface OpenAIResponsesApiResponse {
-  id: string;
-  output_text?: string;
-  output?: Array<OpenAIResponsesToolCall | OpenAIResponsesOutputMessage | { type: string }>;
-  error?: { message?: string; code?: string };
-}
-
-export function getOpenAIConfig() {
-  const apiKey = (process.env.OPENAI_API_KEY || '').trim();
-  const model = (process.env.OPENAI_MODEL || '').trim() || 'gpt-4.1-mini';
-  return {
-    configured: Boolean(apiKey && apiKey !== 'MY_OPENAI_API_KEY'),
-    apiKey,
-    model,
-  };
-}
 
 export function sanitizeEkuRequestBody(raw: unknown): {
   valid: boolean;
@@ -292,196 +264,176 @@ export function sanitizeEkuRequestBody(raw: unknown): {
   };
 }
 
-const EKU_TOOLS = [
+const EKU_TOOLS: FunctionDeclaration[] = [
   {
-    type: 'function',
     name: 'get_calendar_events',
     description: 'Read scheduled calendar events for a date or date range (up to 14 days).',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        startDate: { type: 'string', description: 'YYYY-MM-DD start date (defaults to todayISO).' },
-        endDate: { type: 'string', description: 'YYYY-MM-DD end date (defaults to startDate).' },
+        startDate: { type: Type.STRING, description: 'YYYY-MM-DD start date (defaults to todayISO).' },
+        endDate: { type: Type.STRING, description: 'YYYY-MM-DD end date (defaults to startDate).' },
       },
-      required: [],
-      additionalProperties: false,
     },
   },
   {
-    type: 'function',
     name: 'detect_schedule_conflicts',
     description: 'Detect overlapping blocks, overloaded days, and deadline risks across upcoming days.',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        horizonDays: { type: 'integer', description: 'Days to analyze (1 to 14, default 7).' },
+        horizonDays: { type: Type.INTEGER, description: 'Days to analyze (1 to 14, default 7).' },
       },
-      required: [],
-      additionalProperties: false,
     },
   },
   {
-    type: 'function',
     name: 'propose_optimized_schedule',
     description:
       'Analyze fixed vs flexible commitments, open slots, break gaps, and urgent unscheduled tasks for a target date or horizon so you can build conflict-free schedule proposals.',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        targetDate: { type: 'string', description: 'Target YYYY-MM-DD date to prioritize.' },
-        horizonDays: { type: 'integer', description: 'Days to inspect (1 to 7, default 3).' },
+        targetDate: { type: Type.STRING, description: 'Target YYYY-MM-DD date to prioritize.' },
+        horizonDays: { type: Type.INTEGER, description: 'Days to inspect (1 to 7, default 3).' },
       },
-      required: [],
-      additionalProperties: false,
     },
   },
   {
-    type: 'function',
     name: 'update_calendar_events',
     description:
       'Queue validated calendar/schedule modifications (reschedule activities, schedule tasks into open slots, or insert recovery breaks) for explicit student approval. Never alters fixed past events or overlaps.',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        title: { type: 'string', description: 'Short summary title of this plan proposal.' },
-        reason: { type: 'string', description: 'Why these edits improve the student schedule.' },
-        tradeOffs: { type: 'string', description: 'Honest trade-offs or Minimal trade-off.' },
-        beforePreview: { type: 'string', description: 'Brief before state summary.' },
-        afterPreview: { type: 'string', description: 'Brief after state summary.' },
+        title: { type: Type.STRING, description: 'Short summary title of this plan proposal.' },
+        reason: { type: Type.STRING, description: 'Why these edits improve the student schedule.' },
+        tradeOffs: { type: Type.STRING, description: 'Honest trade-offs or Minimal trade-off.' },
+        beforePreview: { type: Type.STRING, description: 'Brief before state summary.' },
+        afterPreview: { type: Type.STRING, description: 'Brief after state summary.' },
         changes: {
-          type: 'array',
+          type: Type.ARRAY,
           items: {
-            type: 'object',
+            type: Type.OBJECT,
             properties: {
               type: {
-                type: 'string',
+                type: Type.STRING,
                 enum: ['reschedule_activity', 'schedule_task', 'insert_break'],
               },
-              activityId: { type: 'string' },
-              occurrenceDate: { type: 'string' },
-              newDate: { type: 'string' },
-              newStartTime: { type: 'string' },
-              newEndTime: { type: 'string' },
-              scope: { type: 'string', enum: ['single', 'series'] },
-              taskId: { type: 'string' },
-              title: { type: 'string' },
-              date: { type: 'string' },
-              startTime: { type: 'string' },
-              endTime: { type: 'string' },
+              activityId: { type: Type.STRING },
+              occurrenceDate: { type: Type.STRING },
+              newDate: { type: Type.STRING },
+              newStartTime: { type: Type.STRING },
+              newEndTime: { type: Type.STRING },
+              scope: { type: Type.STRING, enum: ['single', 'series'] },
+              taskId: { type: Type.STRING },
+              title: { type: Type.STRING },
+              date: { type: Type.STRING },
+              startTime: { type: Type.STRING },
+              endTime: { type: Type.STRING },
             },
             required: ['type'],
           },
         },
       },
       required: ['title', 'reason', 'changes'],
-      additionalProperties: false,
     },
   },
   {
-    type: 'function',
     name: 'create_study_task',
     description:
       'Queue a new study task for explicit user confirmation before saving to the Tasks backlog.',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        title: { type: 'string', description: 'Clear actionable task title.' },
-        dueDate: { type: ['string', 'null'], description: 'Optional YYYY-MM-DD due date.' },
-        priority: { type: 'string', enum: ['low', 'medium', 'high'] },
+        title: { type: Type.STRING, description: 'Clear actionable task title.' },
+        dueDate: { type: Type.STRING, nullable: true, description: 'Optional YYYY-MM-DD due date.' },
+        priority: { type: Type.STRING, enum: ['low', 'medium', 'high'] },
         category: {
-          type: 'string',
+          type: Type.STRING,
           enum: ['Work', 'Study', 'Health', 'Personal', 'Deep Focus', 'Admin'],
         },
-        estimatedMinutes: { type: 'integer', description: 'Estimated duration in minutes (10-480).' },
+        estimatedMinutes: { type: Type.INTEGER, description: 'Estimated duration in minutes (10-480).' },
       },
       required: ['title'],
-      additionalProperties: false,
     },
   },
   {
-    type: 'function',
     name: 'start_focus_session',
     description: 'Start the EKAGRA Focus timer with a specific duration in minutes.',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        durationMinutes: { type: 'integer', description: 'Duration in minutes (5 to 180, default 25).' },
-        mode: { type: 'string', enum: ['focus', 'short_break', 'long_break'] },
-        activityId: { type: ['string', 'null'], description: 'Optional existing activity ID to link.' },
+        durationMinutes: { type: Type.INTEGER, description: 'Duration in minutes (5 to 180, default 25).' },
+        mode: { type: Type.STRING, enum: ['focus', 'short_break', 'long_break'] },
+        activityId: { type: Type.STRING, nullable: true, description: 'Optional existing activity ID to link.' },
       },
       required: ['durationMinutes'],
-      additionalProperties: false,
     },
   },
   {
-    type: 'function',
     name: 'pause_focus_session',
     description: 'Pause the currently running EKAGRA Focus timer.',
     parameters: {
-      type: 'object',
-      properties: {},
-      required: [],
-      additionalProperties: false,
+      type: Type.OBJECT,
+      properties: {
+        reason: { type: Type.STRING, nullable: true, description: 'Optional pause reason.' },
+      },
     },
   },
   {
-    type: 'function',
     name: 'create_reminder',
     description:
       'Queue a timed reminder/study block on the EKAGRA schedule for user confirmation (triggers Ekagra full-screen and browser notifications).',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        title: { type: 'string', description: 'What to remind the student to do.' },
-        date: { type: 'string', description: 'YYYY-MM-DD date (defaults to todayISO).' },
-        time: { type: 'string', description: '24-hour HH:mm start time.' },
-        durationMinutes: { type: 'integer', description: 'Duration in minutes (15 to 180, default 30).' },
+        title: { type: Type.STRING, description: 'What to remind the student to do.' },
+        date: { type: Type.STRING, description: 'YYYY-MM-DD date (defaults to todayISO).' },
+        time: { type: Type.STRING, description: '24-hour HH:mm start time.' },
+        durationMinutes: { type: Type.INTEGER, description: 'Duration in minutes (15 to 180, default 30).' },
         category: {
-          type: 'string',
+          type: Type.STRING,
           enum: ['Work', 'Study', 'Health', 'Personal', 'Deep Focus', 'Admin'],
         },
-        priority: { type: 'string', enum: ['low', 'medium', 'high'] },
+        priority: { type: Type.STRING, enum: ['low', 'medium', 'high'] },
       },
       required: ['title', 'date', 'time'],
-      additionalProperties: false,
     },
   },
   {
-    type: 'function',
     name: 'get_study_progress',
     description:
       'Get real current study progress: open/completed tasks, overdue items, next upcoming activity, active focus timer, and daily/weekly focus minutes.',
     parameters: {
-      type: 'object',
-      properties: {},
-      required: [],
-      additionalProperties: false,
+      type: Type.OBJECT,
+      properties: {
+        scope: { type: Type.STRING, nullable: true, description: 'Optional progress scope (today or week).' },
+      },
     },
   },
   {
-    type: 'function',
     name: 'search_learning_resources',
     description:
       'Search real educational resources (YouTube videos, official docs, university notes, direct PDFs). Must verify or ask preferredLanguage first unless already known.',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        topic: { type: 'string', description: 'Academic subject or concept to search for.' },
+        topic: { type: Type.STRING, description: 'Academic subject or concept to search for.' },
         preferredLanguage: {
-          type: ['string', 'null'],
+          type: Type.STRING,
+          nullable: true,
           description:
             'Preferred language (e.g. English, Tamil, Hindi). Omit or pass null if not yet stated or remembered.',
         },
-        includePdfs: { type: 'boolean' },
-        includeVideos: { type: 'boolean' },
+        includePdfs: { type: Type.BOOLEAN },
+        includeVideos: { type: Type.BOOLEAN },
         allowFallbackPdfLanguage: {
-          type: 'boolean',
+          type: Type.BOOLEAN,
           description:
             'Set true ONLY when the student explicitly approves viewing an alternative-language (e.g. English) PDF after being informed.',
         },
       },
       required: ['topic'],
-      additionalProperties: false,
     },
   },
 ];
@@ -996,36 +948,9 @@ async function runToolCall(
   }
 }
 
-function extractOpenAIReplyText(resp: OpenAIResponsesApiResponse): string {
-  if (typeof resp.output_text === 'string' && resp.output_text.trim()) {
-    return resp.output_text.trim();
-  }
-  const parts: string[] = [];
-  for (const item of resp.output ?? []) {
-    if (item.type === 'message') {
-      const msg = item as OpenAIResponsesOutputMessage;
-      for (const block of msg.content ?? []) {
-        if (typeof block.text === 'string' && block.text.trim()) {
-          parts.push(block.text.trim());
-        }
-      }
-    }
-  }
-  return parts.join('\n\n').trim();
-}
-
 export async function runEkuConversationTurn(
   reqData: EkuChatRequestBody
 ): Promise<EkuChatResponseBody> {
-  const openai = getOpenAIConfig();
-  if (!openai.configured) {
-    const err = new Error(
-      'OpenAI API key is not configured on this server. Add OPENAI_API_KEY in Settings > Secrets to enable Eku.'
-    ) as Error & { status?: number };
-    err.status = 503;
-    throw err;
-  }
-
   const { snapshot } = reqData;
   const { valid: validActivities } = sanitizeActivitiesForAnalysis(snapshot.activities);
   const sanitizedTasks: TaskItem[] = snapshot.tasks.map((t) => ({
@@ -1063,17 +988,6 @@ export async function runEkuConversationTurn(
     '6. Keep replies clear, encouraging, concise (easy to read in a compact floating chat drawer and natural if spoken aloud). Do not dump raw markdown links if resource cards already show them cleanly.',
   ].join('\n');
 
-  const inputMessages = [
-    ...reqData.history.map((h) => ({
-      role: h.role,
-      content: h.content,
-    })),
-    {
-      role: 'user' as const,
-      content: reqData.message,
-    },
-  ];
-
   const ctx: ExecutionContext = {
     snapshot,
     validActivities,
@@ -1085,83 +999,26 @@ export async function runEkuConversationTurn(
     detectedPreferredLanguage: null,
   };
 
-  let previousResponseId: string | undefined;
-  let nextInput: unknown = inputMessages;
   let finalReply = '';
-
-  for (let step = 0; step < 5; step++) {
-    const bodyPayload: Record<string, unknown> = {
-      model: openai.model,
-      instructions,
-      input: nextInput,
+  try {
+    const loopResult = await runGeminiFunctionCallingLoop({
+      systemInstruction: instructions,
+      history: reqData.history,
+      userMessage: reqData.message,
       tools: EKU_TOOLS,
-      tool_choice: 'auto',
-      ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
-    };
-
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${openai.apiKey}`,
-      },
-      body: JSON.stringify(bodyPayload),
-      signal: AbortSignal.timeout(20_000),
+      executeTool: (name, args) => runToolCall(name, args, ctx),
+      maxSteps: 5,
     });
-
-    const json = (await response.json().catch(() => ({}))) as OpenAIResponsesApiResponse;
-
-    if (!response.ok) {
-      const upstreamMsg = json?.error?.message || `OpenAI API returned HTTP ${response.status}`;
-      const err = new Error(
-        response.status === 401 || response.status === 403
-          ? 'OpenAI API authentication failed on the server. Verify OPENAI_API_KEY configuration.'
-          : response.status === 429
-          ? 'OpenAI rate limit reached. Please wait a moment and try again.'
-          : upstreamMsg
-      ) as Error & { status?: number };
-      err.status = response.status === 401 || response.status === 403 ? 403 : response.status >= 400 ? response.status : 502;
+    finalReply = loopResult.replyText;
+  } catch (err) {
+    const existingStatus = (err as { status?: number })?.status;
+    if (typeof existingStatus === 'number' && existingStatus >= 400 && existingStatus < 600) {
       throw err;
     }
-
-    previousResponseId = json.id;
-    const toolCalls = (json.output ?? []).filter(
-      (item): item is OpenAIResponsesToolCall =>
-        item.type === 'function_call' &&
-        typeof (item as OpenAIResponsesToolCall).call_id === 'string' &&
-        typeof (item as OpenAIResponsesToolCall).name === 'string'
-    );
-
-    if (toolCalls.length === 0) {
-      finalReply = extractOpenAIReplyText(json);
-      break;
-    }
-
-    const toolOutputs: Array<{
-      type: 'function_call_output';
-      call_id: string;
-      output: string;
-    }> = [];
-
-    for (const tc of toolCalls) {
-      let parsedArgs: Record<string, unknown> = {};
-      try {
-        const parsed = JSON.parse(tc.arguments || '{}');
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          parsedArgs = parsed as Record<string, unknown>;
-        }
-      } catch {
-        parsedArgs = {};
-      }
-      const toolResult = await runToolCall(tc.name, parsedArgs, ctx);
-      toolOutputs.push({
-        type: 'function_call_output',
-        call_id: tc.call_id,
-        output: JSON.stringify(toolResult),
-      });
-    }
-
-    nextInput = toolOutputs;
+    const classified = classifyGeminiHttpError(err);
+    const wrapped = new Error(classified.message) as Error & { status?: number };
+    wrapped.status = classified.status;
+    throw wrapped;
   }
 
   if (!finalReply) {

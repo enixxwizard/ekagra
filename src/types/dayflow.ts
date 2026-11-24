@@ -42,6 +42,14 @@ export interface RecurrenceRule {
   endDate?: string | null; // YYYY-MM-DD
 }
 
+export interface MonthlyPhaseOverride {
+  year: number;
+  month: number; // 1..12
+  title?: string;
+  focusTopic?: string;
+  description?: string;
+}
+
 export interface ActivityOverride {
   title?: string;
   description?: string;
@@ -68,6 +76,8 @@ export interface ScheduleActivity {
   recurrence: RecurrenceRule;
   excludedDates?: string[];
   occurrenceOverrides?: Record<string, ActivityOverride>;
+  monthlyPhaseOverrides?: MonthlyPhaseOverride[];
+  isOptional?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -88,6 +98,7 @@ export interface ResolvedActivity {
   isRecurring: boolean;
   recurrence: RecurrenceRule;
   hasOverride: boolean;
+  isOptional?: boolean;
 }
 
 export interface TaskItem {

@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import {
-  downloadAuthenticatedLibraryFile,
   downloadGeneratedCoverPng,
-  fetchAuthenticatedPdfBytes,
+  downloadLocalLibraryPdf,
+  openLocalPdfForReader,
   updateLibraryResourceApi,
   uploadLibraryCoverPngApi,
 } from '../../services/libraryService';
@@ -117,8 +117,8 @@ export const BookDetailsView: React.FC<BookDetailsViewProps> = ({
     });
 
     try {
-      const bytes = await fetchAuthenticatedPdfBytes(authCreds, resource.id);
-      const ocrResult = await runLocalOcrOnPdf(bytes, {
+      const rangeSource = await openLocalPdfForReader(resource.id);
+      const ocrResult = await runLocalOcrOnPdf(rangeSource, {
         maxPagesToScan: 18,
         onProgress: (prog) => setOcrProgress(prog),
       });
@@ -325,9 +325,8 @@ export const BookDetailsView: React.FC<BookDetailsViewProps> = ({
               <button
                 type="button"
                 onClick={() =>
-                  void downloadAuthenticatedLibraryFile(
-                    authCreds,
-                    `/api/library/resources/${encodeURIComponent(resource.id)}/file`,
+                  void downloadLocalLibraryPdf(
+                    resource.id,
                     resource.originalFileName || `${resource.title}.pdf`
                   )
                 }

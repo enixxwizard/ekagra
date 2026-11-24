@@ -1,13 +1,32 @@
 import type {
   ActivityCategory,
+  MonthlyPhaseOverride,
   PdfExtractedQuotation,
   PriorityLevel,
   RecurrenceRule,
 } from './dayflow';
 
-export type PdfDocumentType = 'daily' | 'weekly' | 'monthly' | 'deadlines' | 'mixed';
+export type PdfDocumentType =
+  | 'daily'
+  | 'weekly'
+  | 'monthly'
+  | 'roadmap'
+  | 'deadlines'
+  | 'mixed';
 
 export type PdfProvenance = 'explicit' | 'inferred' | 'suggested';
+
+export type PdfScheduleStatusCode =
+  | 'valid_schedule'
+  | 'recurring_timetable'
+  | 'roadmap_detected'
+  | 'start_date_required'
+  | 'clarification_required'
+  | 'conflicts_detected'
+  | 'study_resource'
+  | 'rejected_unusable';
+
+export type PdfSundayPolicy = 'rest' | 'optional_review' | 'active' | 'unspecified';
 
 export interface PdfWeeklyPlanItem {
   id: string;
@@ -24,6 +43,8 @@ export interface PdfWeeklyPlanItem {
   provenance: PdfProvenance;
   notes: string;
   included: boolean;
+  optional?: boolean;
+  monthlyOverrides?: MonthlyPhaseOverride[];
 }
 
 export interface PdfDailyPlanItem {
@@ -39,6 +60,7 @@ export interface PdfDailyPlanItem {
   sourcePage: number;
   notes: string;
   included: boolean;
+  optional?: boolean;
 }
 
 export interface PdfMonthlyGoalItem {
@@ -47,6 +69,19 @@ export interface PdfMonthlyGoalItem {
   monthLabel: string; // e.g., "December"
   year: number | null;
   goals: string[];
+  category: ActivityCategory;
+  sourcePage: number;
+  provenance: PdfProvenance;
+  included: boolean;
+}
+
+export interface PdfRoadmapMilestoneItem {
+  id: string;
+  phaseLabel: string; // e.g., "Week 1", "Phase 2", "Milestone 3"
+  title: string;
+  targetMonth: number | null;
+  targetYear: number | null;
+  targetDate: string | null;
   category: ActivityCategory;
   sourcePage: number;
   provenance: PdfProvenance;
@@ -84,9 +119,24 @@ export interface PdfBreakPeriodItem {
 export interface PdfValidationWarning {
   id: string;
   severity: 'warning' | 'info';
-  section: 'weekly' | 'daily' | 'monthly' | 'deadlines' | 'breaks' | 'general';
+  section: 'weekly' | 'daily' | 'monthly' | 'roadmap' | 'deadlines' | 'breaks' | 'general';
   message: string;
   sourcePage?: number;
+}
+
+export interface PdfPlanMetadata {
+  suggestedStartDate: string | null;
+  suggestedEndDate: string | null;
+  dateRangeProvenance: PdfProvenance | null;
+  dateRangeLabel: string | null;
+  studyWeekdays: number[];
+  sundayPolicy: PdfSundayPolicy;
+  declaredStudyWindow: { startTime: string; endTime: string } | null;
+  missingInformation: string[];
+  clarificationReasons: string[];
+  validationStatus: PdfScheduleStatusCode;
+  validationMessage: string;
+  isStudyResourceOnly?: boolean;
 }
 
 export interface ExtractedPdfTable {
@@ -117,16 +167,18 @@ export interface StructuredPdfPlan {
   dailyPlans: PdfDailyPlanItem[];
   weeklyPlans: PdfWeeklyPlanItem[];
   monthlyGoals: PdfMonthlyGoalItem[];
+  roadmapMilestones?: PdfRoadmapMilestoneItem[];
   deadlines: PdfDeadlineItem[];
   breakPeriods: PdfBreakPeriodItem[];
   quotations: PdfExtractedQuotation[];
   warnings: PdfValidationWarning[];
+  metadata?: PdfPlanMetadata;
   cached?: boolean;
 }
 
 export interface PdfAutoSyncReviewItem {
   id: string;
-  section: 'weekly' | 'daily' | 'deadlines';
+  section: 'weekly' | 'daily' | 'deadlines' | 'dates';
   title: string;
   reason: string;
   sourcePage?: number;
@@ -152,4 +204,3 @@ export interface PdfAutoSyncCommitResult {
   reviewItems: PdfAutoSyncReviewItem[];
   timetableDiff: PdfTimetableDiff;
 }
-

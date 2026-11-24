@@ -2,12 +2,20 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import {
   createLibraryResourceApi,
-  fetchAuthenticatedPdfBytes,
+  findDuplicateLibraryResource,
   inspectLibraryUrlApi,
+  openLocalPdfForReader,
   updateLibraryResourceApi,
   uploadLibraryCoverPngApi,
   uploadLibraryPdfFileApi,
 } from '../../services/libraryService';
+import {
+  checkStorageHeadroom,
+  PDF_SOFT_MAX_BYTES,
+  StorageOperationAbortedError,
+  StorageQuotaError,
+  validatePdfFileHeader,
+} from '../../services/storage/blobStore';
 import type {
   LibraryCoverTemplateId,
   LibraryResource,
@@ -33,8 +41,6 @@ interface AddResourceModalProps {
 
 type AddMode = 'pdf' | 'url';
 
-const MAX_UPLOAD_BYTES = 35 * 1024 * 1024;
-
 export const AddResourceModal: React.FC<AddResourceModalProps> = ({
   isOpen,
   onClose,
@@ -42,15 +48,19 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
 }) => {
   const { status: authStatus, session } = useAuth();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [mode, setMode] = useState<AddMode>('pdf');
   const [isDragging, setIsDragging] = useState(false);
 
   // Selected PDF state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFileHash, setSelectedFileHash] = useState<string | null>(null);
+  const [duplicateNotice, setDuplicateNotice] = useState<LibraryResource | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<LibraryPdfAnalysisProgress | null>(
     null
   );
+  const [saveProgressMessage, setSaveProgressMessage] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<LibraryPdfAnalysisResult | null>(null);
   const [importedUrlResourceId, setImportedUrlResourceId] = useState<string | null>(null);
 
@@ -87,8 +97,13 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
   }, [isOpen, isSaving, analysisProgress, inspectingUrl, onClose]);
 
   const resetForm = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
     setSelectedFile(null);
+    setSelectedFileHash(null);
+    setDuplicateNotice(null);
     setAnalysisProgress(null);
+    setSaveProgressMessage(null);
     setAnalysisResult(null);
     setImportedUrlResourceId(null);
     setUrlInput('');
@@ -105,16 +120,23 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
   };
 
   const handleClose = () => {
-    if (isSaving || inspectingUrl) return;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
     resetForm();
     onClose();
   };
 
   const processLocalPdfFile = async (file: File) => {
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setErrorMessage('');
     setUrlNotice(null);
     setSafeExternalUrl(null);
     setImportedUrlResourceId(null);
+    setDuplicateNotice(null);
+    setSelectedFileHash(null);
 
     if (
       file.type !== 'application/pdf' &&
@@ -129,23 +151,48 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
       return;
     }
 
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setErrorMessage('PDF exceeds the 35 MB size limit.');
+    if (file.size > PDF_SOFT_MAX_BYTES) {
+      setErrorMessage('This file exceeds the 1 GB per-document limit.');
       return;
     }
 
     try {
-      const buffer = await file.arrayBuffer();
-      const head = new TextDecoder('ascii').decode(new Uint8Array(buffer.slice(0, 1024)));
-      if (!head.includes('%PDF-')) {
+      const headerValid = await validatePdfFileHeader(file);
+      if (!headerValid) {
         setErrorMessage('This file does not contain a valid PDF header.');
         return;
       }
 
+      const headroom = await checkStorageHeadroom(file.size);
+      if (!headroom.ok) {
+        setErrorMessage('Storage space is insufficient.');
+        return;
+      }
+
       setSelectedFile(file);
-      const analyzed = await analyzePdfForLibrary(buffer, file.name, (prog) =>
-        setAnalysisProgress(prog)
+      setAnalysisProgress({
+        stage: 'loading',
+        currentPage: 0,
+        totalPages: 0,
+        percent: 3,
+        message: 'Preparing your document…',
+      });
+
+      const { duplicate, fileHash } = await findDuplicateLibraryResource(file);
+      if (controller.signal.aborted) return;
+      setSelectedFileHash(fileHash);
+      if (duplicate) {
+        setDuplicateNotice(duplicate);
+      }
+
+      const analyzed = await analyzePdfForLibrary(
+        file,
+        file.name,
+        (prog) => setAnalysisProgress(prog),
+        controller.signal
       );
+      if (controller.signal.aborted) return;
+
       setAnalysisProgress(null);
       setAnalysisResult(analyzed);
       setTitle(analyzed.title);
@@ -154,11 +201,19 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
       setDescription(analyzed.description);
       setCoverTemplate(analyzed.coverTemplate);
     } catch (err) {
+      if (err instanceof StorageOperationAbortedError || controller.signal.aborted) {
+        setAnalysisProgress(null);
+        return;
+      }
       setAnalysisProgress(null);
       setSelectedFile(null);
       setAnalysisResult(null);
       setErrorMessage(
-        err instanceof Error ? err.message : 'Unable to analyze this PDF document.'
+        err instanceof StorageQuotaError
+          ? 'Storage space is insufficient.'
+          : err instanceof Error
+          ? err.message
+          : 'Unable to analyze this PDF document.'
       );
     }
   };
@@ -195,10 +250,10 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
       if (result.kind === 'pdf_imported' && result.resource) {
         setImportedUrlResourceId(result.resource.id);
         setSafeExternalUrl(result.safeUrl);
-        setUrlNotice('Public PDF downloaded! Indexing pages and topics now…');
-        const bytes = await fetchAuthenticatedPdfBytes(authCreds, result.resource.id);
+        setUrlNotice('Preparing your document…');
+        const rangeSource = await openLocalPdfForReader(result.resource.id);
         const analyzed = await analyzePdfForLibrary(
-          bytes,
+          rangeSource,
           result.resource.originalFileName || `${result.suggestedTitle}.pdf`,
           (prog) => setAnalysisProgress(prog)
         );
@@ -209,7 +264,7 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
         setSubject(analyzed.subject);
         setDescription(analyzed.description);
         setCoverTemplate(analyzed.coverTemplate);
-        setUrlNotice('PDF downloaded and indexed. Review the cover details and click Save Book.');
+        setUrlNotice('Resource ready to save. Review the details below and click Save to Library.');
       } else {
         setSafeExternalUrl(result.safeUrl);
         setUrlNotice(result.note);
@@ -240,7 +295,11 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
       return;
     }
 
+    const saveController = new AbortController();
+    abortControllerRef.current = saveController;
     setIsSaving(true);
+    setSaveProgressMessage('Saving resource...');
+
     try {
       // Case 1: PDF uploaded from device
       if (mode === 'pdf' && selectedFile && analysisResult) {
@@ -252,6 +311,7 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
           resourceType: 'pdf',
           originalFileName: selectedFile.name,
           originalFileSize: selectedFile.size,
+          fileHash: selectedFileHash,
           coverTemplate,
           totalPages: analysisResult.totalPages,
           topics: analysisResult.topics,
@@ -264,7 +324,14 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
           authCreds,
           created.id,
           selectedFile,
-          selectedFile.name
+          selectedFile.name,
+          {
+            signal: saveController.signal,
+            onProgress: (written, total) => {
+              const pct = total > 0 ? Math.round((written / total) * 100) : 100;
+              setSaveProgressMessage(`Saving resource... ${pct}%`);
+            },
+          }
         );
 
         const withCover = await uploadLibraryCoverPngApi(authCreds, created.id, {
@@ -343,10 +410,15 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
 
       setErrorMessage('Please select a PDF file or inspect a resource URL first.');
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Unable to save resource to your library.'
-      );
+      if (err instanceof StorageOperationAbortedError) {
+        setErrorMessage('Save cancelled.');
+      } else {
+        setErrorMessage(
+          err instanceof Error ? err.message : 'Unable to save resource to your library.'
+        );
+      }
     } finally {
+      setSaveProgressMessage(null);
       setIsSaving(false);
     }
   };
@@ -470,7 +542,7 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
                 {selectedFile ? selectedFile.name : 'Drop a textbook, notes, or syllabus PDF'}
               </p>
               <p className="mt-1 text-xs text-[var(--df-text-muted)]">
-                Supports digital, scanned, and handwritten PDFs up to 35 MB. Original file stays untouched.
+                Supports PDFs up to 1 GB depending on available device storage. Saved on this device for offline reading.
               </p>
               <button
                 type="button"
@@ -513,19 +585,38 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
           </form>
         )}
 
+        {/* Duplicate File Notice */}
+        {duplicateNotice && !errorMessage && (
+          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-amber-400/40 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-800 dark:text-amber-200">
+            <BiIcon name="exclamation-triangle" className="mt-0.5 shrink-0" />
+            <div>
+              <p className="font-semibold">
+                Duplicate file detected: &ldquo;{duplicateNotice.title}&rdquo; is already in your Library.
+              </p>
+              <p className="mt-0.5 opacity-90">
+                You can cancel to keep the existing copy, or save another copy below.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Analysis Progress Bar */}
-        {analysisProgress && (
+        {(analysisProgress || saveProgressMessage) && (
           <div className="mt-4 rounded-xl border border-[var(--df-border)] bg-[var(--df-surface-muted)] p-3.5">
             <div className="flex items-center justify-between text-xs font-medium text-[var(--df-text)]">
-              <span>{analysisProgress.message}</span>
-              <span className="font-mono tabular-nums">{analysisProgress.percent}%</span>
+              <span>{saveProgressMessage || analysisProgress?.message}</span>
+              {analysisProgress && !saveProgressMessage && (
+                <span className="font-mono tabular-nums">{analysisProgress.percent}%</span>
+              )}
             </div>
-            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[var(--df-border)]">
-              <div
-                className="h-full rounded-full bg-[var(--df-accent)] transition-all duration-200"
-                style={{ width: `${analysisProgress.percent}%` }}
-              />
-            </div>
+            {analysisProgress && !saveProgressMessage && (
+              <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[var(--df-border)]">
+                <div
+                  className="h-full rounded-full bg-[var(--df-accent)] transition-all duration-200"
+                  style={{ width: `${analysisProgress.percent}%` }}
+                />
+              </div>
+            )}
           </div>
         )}
 
@@ -662,8 +753,7 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
           <button
             type="button"
             onClick={handleClose}
-            disabled={isSaving}
-            className="min-h-[40px] rounded-xl border border-[var(--df-border)] px-4 text-xs font-medium text-[var(--df-text-muted)] transition-colors hover:bg-[var(--df-surface-hover)] hover:text-[var(--df-text)] disabled:opacity-50"
+            className="min-h-[40px] rounded-xl border border-[var(--df-border)] px-4 text-xs font-medium text-[var(--df-text-muted)] transition-colors hover:bg-[var(--df-surface-hover)] hover:text-[var(--df-text)]"
           >
             Cancel
           </button>
@@ -674,7 +764,7 @@ export const AddResourceModal: React.FC<AddResourceModalProps> = ({
             className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[var(--df-cta)] px-5 text-xs font-semibold text-[var(--df-cta-fg)] transition-opacity hover:opacity-90 disabled:opacity-40"
           >
             <BiIcon name="check2-circle" />
-            <span>{isSaving ? 'Saving Book…' : 'Save to Library'}</span>
+            <span>{isSaving ? 'Saving resource…' : 'Save to Library'}</span>
           </button>
         </div>
       </div>

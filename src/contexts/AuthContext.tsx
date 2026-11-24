@@ -125,8 +125,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (!supabase) {
         if (!cancelled) {
+          setGuestModePersisted(true);
           setAuthState({
-            status: isGuestModePersisted() ? 'guest' : 'unauthenticated',
+            status: 'guest',
             user: null,
             session: null,
             error: null,
@@ -158,22 +159,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      if (error) {
-        setAuthState({
-          status: isGuestModePersisted() ? 'guest' : 'error',
-          user: null,
-          session: null,
-          error,
-          isSupabaseConfigured: true,
-        });
-        return;
-      }
-
+      // Phase 1 local-first workspace: always start directly in local workspace even if Supabase session is absent
+      setGuestModePersisted(true);
       setAuthState({
-        status: isGuestModePersisted() ? 'guest' : 'unauthenticated',
+        status: 'guest',
         user: null,
         session: null,
-        error: null,
+        error: error ?? null,
         isSupabaseConfigured: true,
       });
     };
@@ -218,8 +210,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             return prev;
           }
           return {
-            status:
-              prev.status === 'guest' && isGuestModePersisted() ? 'guest' : 'unauthenticated',
+            status: 'guest',
             user: null,
             session: null,
             error: prev.status === 'error' ? prev.error : null,
@@ -602,12 +593,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await authService.signOut();
       recoveryFlowRef.current = false;
       setPendingConfirmationEmail(null);
-      setGuestModePersisted(false);
+      setGuestModePersisted(true);
       setMigrationStatus('idle');
       setMigrationSummary(null);
       setMigrationError(null);
       setAuthState({
-        status: 'unauthenticated',
+        status: 'guest',
         user: null,
         session: null,
         error: null,
@@ -625,12 +616,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const clearAuthError = useCallback(() => {
     setAuthState((prev) => ({
       ...prev,
-      status:
-        prev.status === 'error'
-          ? isGuestModePersisted()
-            ? 'guest'
-            : 'unauthenticated'
-          : prev.status,
+      status: prev.status === 'error' ? 'guest' : prev.status,
       error: null,
     }));
   }, []);

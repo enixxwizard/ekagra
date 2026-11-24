@@ -54,6 +54,9 @@ export function resolveActivitiesForDate(
 ): ResolvedActivity[] {
   const seenIds = new Set<string>();
   const resolved: ResolvedActivity[] = [];
+  const [yrStr, moStr] = targetDateISO.split('-');
+  const targetYear = Number(yrStr);
+  const targetMonth = Number(moStr);
 
   for (const act of activities) {
     if (seenIds.has(act.id)) continue;
@@ -61,14 +64,28 @@ export function resolveActivitiesForDate(
     seenIds.add(act.id);
 
     const override = act.occurrenceOverrides?.[targetDateISO];
+    const phaseOverride =
+      act.monthlyPhaseOverrides?.find(
+        (p) => p.year === targetYear && p.month === targetMonth
+      ) ?? null;
     const isRecurring = (act.recurrence?.frequency ?? 'none') !== 'none';
+
+    const baseTitleWithPhase = phaseOverride?.title
+      ? phaseOverride.title
+      : phaseOverride?.focusTopic
+      ? `${act.title} — ${phaseOverride.focusTopic}`
+      : act.title;
+
+    const baseDescWithPhase = phaseOverride?.description
+      ? [act.description, phaseOverride.description].filter(Boolean).join(' · ')
+      : act.description;
 
     resolved.push({
       instanceId: `${act.id}::${targetDateISO}`,
       activityId: act.id,
       occurrenceDate: targetDateISO,
-      title: override?.title ?? act.title,
-      description: override?.description ?? act.description,
+      title: override?.title ?? baseTitleWithPhase,
+      description: override?.description ?? baseDescWithPhase,
       startTime: override?.startTime ?? act.startTime,
       endTime: override?.endTime ?? act.endTime,
       category: override?.category ?? act.category,
@@ -79,6 +96,7 @@ export function resolveActivitiesForDate(
       isRecurring,
       recurrence: act.recurrence,
       hasOverride: Boolean(override),
+      isOptional: act.isOptional ?? false,
     });
   }
 
@@ -119,6 +137,9 @@ export function describeRecurrence(activity: Pick<ScheduleActivity, 'recurrence'
     case 'custom_weekdays': {
       const days = [...(activity.recurrence.daysOfWeek ?? [])].sort((a, b) => a - b);
       if (days.length === 0) return 'Custom days';
+      if (days.length === 6 && days.join(',') === '1,2,3,4,5,6') {
+        return 'Mon–Sat';
+      }
       return days.map((d) => dayNames[d]).join(', ');
     }
     default:
@@ -171,7 +192,7 @@ export interface GroupWeeklyImportOptions {
 
 /**
  * Compresses per-weekday timetable entries into compact recurring ScheduleActivity rules
- * so Mon–Fri identical blocks become 1 recurring rule instead of fragmented duplicates.
+ * so Mon–Sat identical blocks become 1 recurring rule instead of fragmented duplicates.
  */
 export function groupWeeklyPlansIntoScheduleActivities(
   weeklyPlans: PdfWeeklyPlanItem[],
@@ -188,16 +209,23 @@ export function groupWeeklyPlansIntoScheduleActivities(
     category: ActivityCategory;
     priority: ScheduleActivity['priority'];
     isBreak: boolean;
+    isOptional: boolean;
     sourcePages: Set<number>;
     days: Set<number>;
     notes: string;
+    monthlyOverrides: ScheduleActivity['monthlyPhaseOverrides'];
+    startDate: string | null;
+    endDate: string | null;
   }
 
   const buckets = new Map<string, Bucket>();
 
   for (const item of weeklyPlans) {
     if (!item.included || !allowedDaySet.has(item.weekday)) continue;
-    const key = `study::${item.title.trim().toLowerCase()}::${item.startTime}::${item.endTime}::${item.category}`;
+    const moSig = item.monthlyOverrides?.length
+      ? item.monthlyOverrides.map((m) => `${m.year}-${m.month}:${m.title ?? m.focusTopic ?? ''}`).join('|')
+      : '';
+    const key = `study::${item.title.trim().toLowerCase()}::${item.startTime}::${item.endTime}::${item.category}::${item.optional ? 'opt' : 'req'}::${moSig}`;
     const existing = buckets.get(key);
     if (existing) {
       existing.days.add(item.weekday);
@@ -210,9 +238,16 @@ export function groupWeeklyPlansIntoScheduleActivities(
         category: item.category,
         priority: item.priority,
         isBreak: false,
+        isOptional: Boolean(item.optional),
         sourcePages: new Set([item.sourcePage]),
         days: new Set([item.weekday]),
         notes: item.notes,
+        monthlyOverrides:
+          item.monthlyOverrides && item.monthlyOverrides.length > 0
+            ? item.monthlyOverrides
+            : undefined,
+        startDate: item.startDate ?? null,
+        endDate: item.endDate ?? null,
       });
     }
   }
@@ -238,9 +273,13 @@ export function groupWeeklyPlansIntoScheduleActivities(
           category: 'Health',
           priority: 'low',
           isBreak: true,
+          isOptional: true,
           sourcePages: new Set([brk.sourcePage]),
           days: new Set(matchingDays),
           notes: 'Optional break / unavailable period',
+          monthlyOverrides: undefined,
+          startDate: null,
+          endDate: null,
         });
       }
     }
@@ -252,7 +291,9 @@ export function groupWeeklyPlansIntoScheduleActivities(
     const days = Array.from(bucket.days).sort((a, b) => a - b);
     if (days.length === 0) continue;
 
-    const alignedStartDate = alignDateToFirstMatchingWeekday(options.startDate, days);
+    const effectiveStart = bucket.startDate || options.startDate;
+    const effectiveEnd = bucket.endDate || options.endDate || null;
+    const alignedStartDate = alignDateToFirstMatchingWeekday(effectiveStart, days);
     const pagesLabel = Array.from(bucket.sourcePages)
       .sort((a, b) => a - b)
       .join(', ');
@@ -260,11 +301,11 @@ export function groupWeeklyPlansIntoScheduleActivities(
       ? { frequency: 'none' as const, endDate: null }
       : {
           ...chooseFrequencyFromWeekdays(days),
-          endDate: options.endDate || null,
+          endDate: effectiveEnd,
         };
 
     const metaDesc = [
-      bucket.isBreak ? '[Break / Unavailable]' : null,
+      bucket.isBreak ? '[Break / Unavailable]' : bucket.isOptional ? '[Optional]' : null,
       `Source: ${options.sourceFile} (p. ${pagesLabel})`,
       bucket.notes || null,
       `TZ: ${options.timeZone}`,
@@ -287,6 +328,8 @@ export function groupWeeklyPlansIntoScheduleActivities(
       recurrence,
       excludedDates: [],
       occurrenceOverrides: {},
+      ...(bucket.monthlyOverrides ? { monthlyPhaseOverrides: bucket.monthlyOverrides } : {}),
+      ...(bucket.isOptional ? { isOptional: true } : {}),
       createdAt: now,
       updatedAt: now,
     });

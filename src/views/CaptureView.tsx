@@ -1,13 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StrictSchedulePreview } from '../components/capture/StrictSchedulePreview';
+import { SmartPdfImportPreview } from '../components/capture/SmartPdfImportPreview';
 import { BiIcon } from '../components/ui/BiIcon';
-import { type ConfirmSchedulePdfResult, useDayFlow } from '../context/DayFlowContext';
+import { useDayFlow } from '../context/DayFlowContext';
 import { useAuth } from '../hooks/useAuth';
+import { buildAuthHeaders } from '../services/aiBrainService';
 import {
   createLibraryResourceApi,
+  deleteLibraryResourceApi,
+  findDuplicateLibraryResource,
   uploadLibraryCoverPngApi,
   uploadLibraryPdfFileApi,
 } from '../services/libraryService';
+import {
+  checkStorageHeadroom,
+  StorageQuotaError,
+  validatePdfFileHeader,
+} from '../services/storage/blobStore';
 import {
   ActivityCategory,
   PdfExtractedQuotation,
@@ -23,22 +31,20 @@ import {
   minutesToTime24,
   parseTimeToMinutes,
 } from '../utils/dateTime';
+import {
+  evaluateSchedulePdfPlan,
+  extractAndValidateIntelligentSchedule,
+  type IntelligentScheduleEvaluation,
+} from '../utils/intelligentScheduleValidator';
 import { analyzePdfForLibrary } from '../utils/libraryPdfAnalyzer';
 import {
   ExtractedPdfPage,
   extractPdfPages,
-  parsePdfPagesToStructuredPlan,
   PdfTextExtractionResult,
   renderPdfPagesAsImages,
 } from '../utils/pdfExtractor';
 import { resolveActivitiesForDate } from '../utils/recurrence';
 import { findAvailableSlots } from '../utils/scheduler';
-import {
-  extractAndValidateStrictSchedule,
-  type StrictScheduleSession,
-  type StrictScheduleValidationResult,
-  validateStructuredPlanStrict,
-} from '../utils/strictScheduleValidator';
 
 const CATEGORIES: ActivityCategory[] = [
   'Study',
@@ -88,7 +94,8 @@ export const CaptureView: React.FC = () => {
     deleteNote,
     saveQuotation,
     deleteQuotation,
-    confirmSchedulePdfSessions,
+    importStructuredPdfPlan,
+    syncStructuredPdfPlan,
     setActivePage,
     openQuickActivitySheet,
     pushToast,
@@ -97,7 +104,7 @@ export const CaptureView: React.FC = () => {
   const authCreds = useMemo(
     () => ({
       accessToken: session?.access_token ?? null,
-      isGuest: authStatus === 'guest',
+      isGuest: authStatus !== 'authenticated' || !session?.access_token,
     }),
     [session?.access_token, authStatus]
   );
@@ -110,25 +117,21 @@ export const CaptureView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<CaptureTab>('pdf');
   const [isDraggingPdf, setIsDraggingPdf] = useState(false);
 
-  // Strict PDF extraction, validation & confirmation state
+  // Intelligent PDF extraction, validation & sync state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [pdfExtracting, setPdfExtracting] = useState(false);
   const [pdfExtraction, setPdfExtraction] = useState<PdfTextExtractionResult | null>(null);
   const [pdfError, setPdfError] = useState('');
-  const [strictValidation, setStrictValidation] =
-    useState<StrictScheduleValidationResult | null>(null);
-  const [candidateSessions, setCandidateSessions] = useState<StrictScheduleSession[]>([]);
-  const [analysisLabel, setAnalysisLabel] = useState('Local strict schedule validation');
+  const [structuredPlan, setStructuredPlan] = useState<StructuredPdfPlan | null>(null);
+  const [scheduleEvaluation, setScheduleEvaluation] =
+    useState<IntelligentScheduleEvaluation | null>(null);
   const [extractedQuotes, setExtractedQuotes] = useState<PdfExtractedQuotation[]>([]);
   const [includeMultimodalSnapshots, setIncludeMultimodalSnapshots] = useState(false);
+  const [autoSyncedSummary, setAutoSyncedSummary] = useState<string | null>(null);
 
-  // Optional Gemini server-side scan state (still strictly validated before preview)
+  // Optional Gemini server-side scan state
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
   const [aiError, setAiError] = useState('');
-
-  // Explicit confirmation import state
-  const [confirmingImport, setConfirmingImport] = useState(false);
-  const [confirmResult, setConfirmResult] = useState<ConfirmSchedulePdfResult | null>(null);
 
   // Rejection -> Save to EKAGRA Library bridge state
   const [savingToLibrary, setSavingToLibrary] = useState(false);
@@ -180,7 +183,7 @@ export const CaptureView: React.FC = () => {
 
       const res = await fetch('/api/pdf/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildAuthHeaders(authCreds),
         body: JSON.stringify({
           fileName: extraction.fileName,
           documentHash: extraction.documentHash,
@@ -221,7 +224,70 @@ export const CaptureView: React.FC = () => {
       cachedPlansRef.current.set(cacheKey, data);
       return data;
     },
-    [includeMultimodalSnapshots, todayISO]
+    [authCreds, includeMultimodalSnapshots, todayISO]
+  );
+
+  const maybeAutoSyncPlan = useCallback(
+    async (
+      plan: StructuredPdfPlan,
+      evaluation: IntelligentScheduleEvaluation
+    ): Promise<boolean> => {
+      if (!state.settings.autoSyncPdfSchedule || !evaluation.canAutoSync) {
+        return false;
+      }
+
+      const { commit } = await syncStructuredPdfPlan(plan);
+      if (commit.status === 'synced' && commit.persisted) {
+        const parts = [
+          commit.activitiesAdded > 0
+            ? `${commit.activitiesAdded} ${
+                commit.recurringRulesAdded > 0 ? 'recurring/scheduled' : 'scheduled'
+              } ${commit.activitiesAdded === 1 ? 'activity' : 'activities'}`
+            : null,
+          commit.notesAdded > 0
+            ? `${commit.notesAdded} roadmap ${commit.notesAdded === 1 ? 'note' : 'notes'}`
+            : null,
+          commit.tasksAdded > 0
+            ? `${commit.tasksAdded} ${commit.tasksAdded === 1 ? 'deadline' : 'deadlines'}`
+            : null,
+        ].filter(Boolean);
+        const summary =
+          parts.length > 0
+            ? `Auto-synced ${parts.join(', ')}${
+                commit.duplicatesSkipped > 0 ? ` · ${commit.duplicatesSkipped} duplicates skipped` : ''
+              }.`
+            : 'Schedule synced automatically.';
+        setAutoSyncedSummary(summary);
+        pushToast({
+          type: commit.conflictsCount > 0 ? 'warning' : 'success',
+          title: evaluation.statusMessage,
+          description: summary,
+        });
+        return true;
+      }
+
+      if (commit.status === 'duplicates_only') {
+        const dupMsg = `All entries from "${plan.fileName}" already exist in your schedule.`;
+        setAutoSyncedSummary(dupMsg);
+        pushToast({
+          type: 'info',
+          title: 'Schedule already synced',
+          description: dupMsg,
+        });
+        return true;
+      }
+
+      if (commit.status === 'error') {
+        pushToast({
+          type: 'error',
+          title: 'Auto-sync failed',
+          description: commit.error || 'Review and confirm manually below.',
+        });
+      }
+
+      return false;
+    },
+    [state.settings.autoSyncPdfSchedule, syncStructuredPdfPlan, pushToast]
   );
 
   const handleFilePicked = useCallback(
@@ -232,47 +298,95 @@ export const CaptureView: React.FC = () => {
         return;
       }
 
+      const validPdfHeader = await validatePdfFileHeader(file).catch(() => false);
+      if (!validPdfHeader) {
+        setPdfError('This file does not appear to be a valid PDF document.');
+        return;
+      }
+
       setSelectedFile(file);
       setPdfError('');
       setAiError('');
       setPdfExtracting(true);
       setPdfExtraction(null);
-      setStrictValidation(null);
-      setCandidateSessions([]);
-      setConfirmResult(null);
+      setStructuredPlan(null);
+      setScheduleEvaluation(null);
+      setAutoSyncedSummary(null);
       setSavedToLibraryId(null);
       setLibrarySaveError('');
       setExtractedQuotes([]);
-      setAnalysisLabel('Local strict schedule validation');
 
       try {
         const result = await extractPdfPages(file);
         setPdfExtraction(result);
         setIncludeMultimodalSnapshots(result.isScannedOrEmpty || result.hasComplexTables);
 
-        const strict = extractAndValidateStrictSchedule(result);
-        setStrictValidation(strict);
-
-        if (strict.accepted) {
-          setCandidateSessions(strict.sessions);
-          const localParsed = parsePdfPagesToStructuredPlan(result.fileName, result.pages, {
-            documentHash: result.documentHash,
-            referenceDateISO: todayISO,
-          });
-          setExtractedQuotes(localParsed.quotations ?? []);
-          pushToast({
-            type: 'info',
-            title: 'Schedule ready for review',
-            description: `${strict.sessions.length} dated & timed study ${
-              strict.sessions.length === 1 ? 'session' : 'sessions'
-            } found. Confirm below to add to your calendar.`,
-          });
-        } else {
-          setCandidateSessions([]);
+        if (result.isScannedOrEmpty) {
+          const emptyEval: IntelligentScheduleEvaluation = {
+            accepted: false,
+            statusCode: 'rejected_unusable',
+            statusMessage: 'Study resource detected — save to Library.',
+            scheduleTypeLabel: 'Scanned or Unreadable PDF',
+            startDate: null,
+            endDate: null,
+            dateRangeProvenance: null,
+            hasInferredDates: false,
+            recurringWeekdays: [],
+            weeklyStudyMinutes: 0,
+            optionalWeeklyMinutes: 0,
+            weeklyStudyHoursLabel: '0h',
+            missingInformation: [
+              'No selectable schedule text was found in this PDF. Try Gemini Multimodal Scan or save it to EKAGRA Library.',
+            ],
+            clarificationReasons: [],
+            conflictsCount: 0,
+            conflictSummaries: [],
+            conflictMessages: [],
+            canAutoSync: false,
+          };
+          setScheduleEvaluation(emptyEval);
           pushToast({
             type: 'warning',
-            title: 'Not a valid study schedule',
-            description: strict.reasonDetail,
+            title: 'No readable schedule text found',
+            description: 'Try Gemini Multimodal Scan below or save this PDF to EKAGRA Library.',
+          });
+          return;
+        }
+
+        const { plan, evaluation } = extractAndValidateIntelligentSchedule(
+          result,
+          state.activities,
+          todayISO
+        );
+        setScheduleEvaluation(evaluation);
+
+        if (evaluation.accepted) {
+          setStructuredPlan(plan);
+          setExtractedQuotes(plan.quotations ?? []);
+          const didAutoSync = await maybeAutoSyncPlan(plan, evaluation);
+          if (!didAutoSync) {
+            pushToast({
+              type:
+                evaluation.statusCode === 'start_date_required' ||
+                evaluation.statusCode === 'conflicts_detected'
+                  ? 'warning'
+                  : 'info',
+              title: evaluation.statusMessage,
+              description:
+                evaluation.clarificationReasons[0] ??
+                evaluation.missingInformation[0] ??
+                evaluation.conflictMessages[0] ??
+                `${evaluation.scheduleTypeLabel} ready to review and confirm.`,
+            });
+          }
+        } else {
+          setStructuredPlan(null);
+          pushToast({
+            type: 'warning',
+            title: evaluation.statusMessage,
+            description:
+              evaluation.missingInformation[0] ??
+              'This PDF looks like study notes or reference material rather than a schedule.',
           });
         }
       } catch (err) {
@@ -286,7 +400,7 @@ export const CaptureView: React.FC = () => {
         if (fileInputRef.current) fileInputRef.current.value = '';
       }
     },
-    [todayISO, pushToast]
+    [state.activities, todayISO, maybeAutoSyncPlan, pushToast]
   );
 
   // Support clipboard paste of .pdf files when PDF tab is active; reject pasted plain text as non-PDF
@@ -343,32 +457,42 @@ export const CaptureView: React.FC = () => {
     if (!pdfExtraction) return;
     setAiAnalyzing(true);
     setAiError('');
-    setConfirmResult(null);
+    setAutoSyncedSummary(null);
 
     try {
       const data = await requestGeminiPlan(pdfExtraction, selectedFile, forceMultimodal);
-      const strictAi = validateStructuredPlanStrict(data, pdfExtraction);
-      setStrictValidation(strictAi);
-      setAnalysisLabel(
-        data.analysisSource === 'gemini-multimodal' ? 'Gemini Multimodal' : 'Gemini AI'
-      );
+      const evaluation = evaluateSchedulePdfPlan(data, {
+        existingActivities: state.activities,
+        referenceDateISO: todayISO,
+      });
+      setScheduleEvaluation(evaluation);
 
-      if (strictAi.accepted) {
-        setCandidateSessions(strictAi.sessions);
+      if (evaluation.accepted) {
+        setStructuredPlan(data);
         setExtractedQuotes(data.quotations ?? []);
-        pushToast({
-          type: 'info',
-          title: 'Schedule ready for confirmation',
-          description: `Verified ${strictAi.sessions.length} dated & timed study ${
-            strictAi.sessions.length === 1 ? 'session' : 'sessions'
-          }.`,
-        });
+        const didAutoSync = await maybeAutoSyncPlan(data, evaluation);
+        if (!didAutoSync) {
+          pushToast({
+            type:
+              evaluation.statusCode === 'start_date_required' ||
+              evaluation.statusCode === 'conflicts_detected'
+                ? 'warning'
+                : 'info',
+            title: evaluation.statusMessage,
+            description:
+              evaluation.clarificationReasons[0] ??
+              evaluation.missingInformation[0] ??
+              `${evaluation.scheduleTypeLabel} analyzed via Gemini AI.`,
+          });
+        }
       } else {
-        setCandidateSessions([]);
+        setStructuredPlan(null);
         pushToast({
           type: 'warning',
-          title: 'PDF rejected as a schedule',
-          description: strictAi.reasonDetail,
+          title: evaluation.statusMessage,
+          description:
+            evaluation.missingInformation[0] ??
+            'Gemini classified this document as study material rather than a schedule.',
         });
       }
     } catch (err) {
@@ -378,56 +502,35 @@ export const CaptureView: React.FC = () => {
     }
   };
 
-  const handleConfirmScheduleImport = async () => {
-    if (!strictValidation?.accepted || candidateSessions.length === 0) return;
-    setConfirmingImport(true);
-    try {
-      const sourceName = selectedFile?.name || pdfExtraction?.fileName || 'Schedule.pdf';
-      const result = await confirmSchedulePdfSessions(sourceName, candidateSessions);
-      setConfirmResult(result);
-
-      if (result.ok && result.persisted) {
-        pushToast({
-          type: result.activitiesAdded > 0 ? 'success' : 'info',
-          title:
-            result.activitiesAdded > 0
-              ? 'Schedule added to Calendar'
-              : 'No new sessions added',
-          description:
-            result.activitiesAdded > 0
-              ? `${result.activitiesAdded} ${
-                  result.activitiesAdded === 1 ? 'session' : 'sessions'
-                } saved${
-                  result.duplicatesSkipped > 0
-                    ? ` · ${result.duplicatesSkipped} duplicate${
-                        result.duplicatesSkipped === 1 ? '' : 's'
-                      } skipped`
-                    : ''
-                }.`
-              : `${result.duplicatesSkipped} duplicate${
-                  result.duplicatesSkipped === 1 ? '' : 's'
-                } skipped.`,
-        });
-      } else {
-        pushToast({
-          type: 'error',
-          title: 'Import failed',
-          description: result.error || 'Could not save imported schedule.',
-        });
-      }
-    } finally {
-      setConfirmingImport(false);
-    }
-  };
-
   const handleSaveRejectedPdfToLibrary = async () => {
     if (!selectedFile || savingToLibrary || savedToLibraryId) return;
     setSavingToLibrary(true);
     setLibrarySaveError('');
 
+    let createdId: string | null = null;
     try {
-      const buffer = await selectedFile.arrayBuffer();
-      const analyzed = await analyzePdfForLibrary(buffer, selectedFile.name);
+      const hasValidHeader = await validatePdfFileHeader(selectedFile).catch(() => false);
+      if (!hasValidHeader) {
+        throw new Error('This file does not appear to be a valid PDF document.');
+      }
+
+      const headroom = await checkStorageHeadroom(selectedFile.size);
+      if (!headroom.ok) {
+        throw new StorageQuotaError('Storage space is insufficient.');
+      }
+
+      const { duplicate, fileHash } = await findDuplicateLibraryResource(selectedFile);
+      if (duplicate) {
+        setSavedToLibraryId(duplicate.id);
+        pushToast({
+          type: 'info',
+          title: 'Already in Library',
+          description: `"${duplicate.title}" is already saved on your bookshelf.`,
+        });
+        return;
+      }
+
+      const analyzed = await analyzePdfForLibrary(selectedFile, selectedFile.name);
       const created = await createLibraryResourceApi(authCreds, {
         title: analyzed.title,
         subtitle: analyzed.subtitle,
@@ -436,6 +539,7 @@ export const CaptureView: React.FC = () => {
         resourceType: 'pdf',
         originalFileName: selectedFile.name,
         originalFileSize: selectedFile.size,
+        fileHash,
         coverTemplate: analyzed.coverTemplate,
         totalPages: analyzed.totalPages,
         topics: analyzed.topics,
@@ -443,6 +547,7 @@ export const CaptureView: React.FC = () => {
         analysisStatus: analyzed.analysisStatus,
         analysisNote: analyzed.analysisNote,
       });
+      createdId = created.id;
 
       const withPdf = await uploadLibraryPdfFileApi(
         authCreds,
@@ -466,8 +571,15 @@ export const CaptureView: React.FC = () => {
         description: `"${analyzed.title}" is now on your bookshelf.`,
       });
     } catch (err) {
+      if (createdId) {
+        await deleteLibraryResourceApi(authCreds, createdId).catch(() => undefined);
+      }
       const msg =
-        err instanceof Error ? err.message : 'Could not save this PDF to your Library.';
+        err instanceof StorageQuotaError
+          ? 'Storage space is insufficient.'
+          : err instanceof Error
+          ? err.message
+          : 'Could not save this PDF to your Library.';
       setLibrarySaveError(msg);
       pushToast({
         type: 'error',
@@ -679,19 +791,19 @@ export const CaptureView: React.FC = () => {
       {/* SECTION A: PDF TO SCHEDULE */}
       {activeTab === 'pdf' && (
         <div className="space-y-6">
-          {/* Strict Validation Rules Notice */}
+          {/* Intelligent Schedule Import Rules Notice */}
           <div className="flex flex-col justify-between gap-3 rounded-2xl border border-[var(--df-border)] bg-[var(--df-surface)] px-4 py-3 sm:flex-row sm:items-center">
             <div className="flex items-start gap-2.5 text-xs">
               <BiIcon
-                name="shield-check"
+                name="calendar-check"
                 className="mt-0.5 text-sm shrink-0 text-[var(--df-accent-soft-fg)]"
               />
               <span>
                 <span className="font-semibold text-[var(--df-text)]">
-                  Strict Schedule Validation
+                  Intelligent Schedule Importer
                 </span>
                 <span className="block text-[11px] text-[var(--df-text-muted)]">
-                  Only study schedules or roadmaps with explicit calendar dates, study times, and topics can be previewed and confirmed for Calendar import. Save notes or textbooks to EKAGRA Library instead.
+                  Supports dated schedules, daily routines, recurring weekly timetables, hybrid multi-month plans, and learning roadmaps. Lecture notes, textbooks, and question papers can be saved directly to EKAGRA Library.
                 </span>
               </span>
             </div>
@@ -729,25 +841,23 @@ export const CaptureView: React.FC = () => {
                 <BiIcon name="file-earmark-text" className="text-xl" />
               </div>
               <h2 className="mt-3 font-display text-lg font-bold text-[var(--df-text)]">
-                Upload or paste a study schedule PDF
+                Upload or paste a study schedule or roadmap PDF
               </h2>
               <p className="mt-1 text-xs leading-relaxed text-[var(--df-text-muted)]">
-                Drop, choose, or paste a <span className="font-mono">.pdf</span> containing dates, study times, and topics. Nothing is added to your calendar until you review and confirm.
+                Drop, choose, or paste a <span className="font-mono">.pdf</span> timetable, weekly plan, daily routine, or roadmap. Complete schedules auto-sync; ambiguous ranges or conflicts wait for your confirmation.
               </p>
 
               <button
                 type="button"
-                disabled={pdfExtracting || confirmingImport}
+                disabled={pdfExtracting || aiAnalyzing}
                 onClick={() => fileInputRef.current?.click()}
                 className="mt-4 inline-flex min-h-[44px] items-center gap-2 rounded-2xl bg-[var(--df-accent)] px-5 text-sm font-semibold text-[var(--df-accent-fg)] transition-transform hover:brightness-95 active:scale-[0.98] disabled:opacity-60"
               >
                 <BiIcon name="file-earmark-arrow-up" className="text-base" />
                 {pdfExtracting
-                  ? 'Reading & Validating PDF...'
+                  ? 'Reading & Analyzing PDF...'
                   : aiAnalyzing
                   ? 'Analyzing schedule...'
-                  : confirmingImport
-                  ? 'Saving to Calendar...'
                   : 'Choose PDF file'}
               </button>
 
@@ -759,26 +869,27 @@ export const CaptureView: React.FC = () => {
             </div>
           </section>
 
-          {/* REJECTED PDF CARD + SAVE TO EKAGRA LIBRARY BRIDGE */}
-          {pdfExtraction && strictValidation && !strictValidation.accepted && (
+          {/* REJECTED STUDY RESOURCE CARD + SAVE TO EKAGRA LIBRARY BRIDGE */}
+          {pdfExtraction && scheduleEvaluation && !scheduleEvaluation.accepted && (
             <section
               role="alert"
-              className="space-y-4 rounded-3xl border border-rose-300 bg-rose-50/70 p-5 sm:p-6 dark:border-rose-900/50 dark:bg-rose-950/25"
+              className="space-y-4 rounded-3xl border border-amber-300 bg-amber-50/70 p-5 sm:p-6 dark:border-amber-900/50 dark:bg-amber-950/25"
             >
               <div className="flex items-start gap-3">
                 <BiIcon
-                  name="exclamation-circle-fill"
-                  className="mt-0.5 text-lg shrink-0 text-rose-600 dark:text-rose-400"
+                  name="book-half"
+                  className="mt-0.5 text-lg shrink-0 text-amber-700 dark:text-amber-300"
                 />
                 <div className="space-y-1.5">
                   <p className="text-xs font-semibold text-[var(--df-text-muted)]">
                     {pdfExtraction.fileName}
                   </p>
                   <h3 className="text-sm font-bold leading-relaxed text-[var(--df-text)]">
-                    {strictValidation.errorMessage}
+                    {scheduleEvaluation.statusMessage}
                   </h3>
                   <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
-                    Reason: {strictValidation.reasonDetail}
+                    {scheduleEvaluation.missingInformation[0] ??
+                      'No recurring timetable, dated schedule, or learning roadmap milestones were found. Save this resource to EKAGRA Library instead.'}
                   </p>
                 </div>
               </div>
@@ -811,7 +922,8 @@ export const CaptureView: React.FC = () => {
                   </button>
                 )}
 
-                {strictValidation.classification === 'rejected_scanned_unreadable' && (
+                {(pdfExtraction.isScannedOrEmpty ||
+                  scheduleEvaluation.statusCode === 'rejected_unusable') && (
                   <button
                     type="button"
                     disabled={aiAnalyzing}
@@ -842,33 +954,35 @@ export const CaptureView: React.FC = () => {
             </section>
           )}
 
-          {/* ACCEPTED VALID SCHEDULE PREVIEW + CONFIRMATION */}
-          {pdfExtraction && strictValidation && strictValidation.accepted && (
+          {/* ACCEPTED SCHEDULE PREVIEW + CONFIRMATION */}
+          {pdfExtraction && scheduleEvaluation && scheduleEvaluation.accepted && structuredPlan && (
             <div className="space-y-6">
-              <StrictSchedulePreview
-                fileName={pdfExtraction.fileName}
-                pageCount={pdfExtraction.pageCount}
-                analysisLabel={analysisLabel}
-                validation={strictValidation}
-                sessions={candidateSessions}
-                onChangeSessions={setCandidateSessions}
+              <SmartPdfImportPreview
+                plan={structuredPlan}
+                onUpdatePlan={(updater) =>
+                  setStructuredPlan((prev) => (prev ? updater(prev) : prev))
+                }
                 existingActivities={state.activities}
-                importedFingerprints={state.importedFingerprints}
                 timeFormat={timeFormat}
-                confirming={confirmingImport}
-                confirmResult={confirmResult}
-                onConfirmImport={() => void handleConfirmScheduleImport()}
+                onImport={importStructuredPdfPlan}
+                onNotify={pushToast}
                 onOpenCalendar={() => setActivePage('calendar')}
+                autoSyncedSummary={autoSyncedSummary}
               />
 
               {/* Optional Gemini Verification for Multi-Column Timetable PDFs */}
               <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">
                 <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                  <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
-                    Need to double-check a complex multi-column table? Run optional{' '}
-                    <span className="font-semibold text-[var(--df-text)]">Gemini AI</span>{' '}
-                    verification. All entries still require strict date &amp; time validation and your confirmation.
-                  </p>
+                  <div className="space-y-1">
+                    <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
+                      Need deeper parsing for a complex multi-column table or handwritten scan? Run optional{' '}
+                      <span className="font-semibold text-[var(--df-text)]">Gemini AI</span>{' '}
+                      extraction. Deterministic validation still verifies weekdays, breaks, and date ranges.
+                    </p>
+                    <p className="text-[11px] text-[var(--df-text-subtle)]">
+                      Free-tier AI notice: sends extracted pages from this PDF to Gemini only when you click Analyze.
+                    </p>
+                  </div>
                   <div className="flex flex-wrap items-center gap-3 shrink-0">
                     <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-[var(--df-text)]">
                       <input
@@ -881,12 +995,12 @@ export const CaptureView: React.FC = () => {
                     </label>
                     <button
                       type="button"
-                      disabled={aiAnalyzing || confirmingImport}
+                      disabled={aiAnalyzing}
                       onClick={() => void handleAnalyzeWithGemini(false)}
                       className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-3.5 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)] disabled:opacity-60 whitespace-nowrap"
                     >
                       <BiIcon name="stars" className="text-xs" />
-                      {aiAnalyzing ? 'Analyzing...' : 'Verify with Gemini AI'}
+                      {aiAnalyzing ? 'Analyzing...' : 'Analyze with Gemini AI'}
                     </button>
                   </div>
                 </div>

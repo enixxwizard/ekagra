@@ -2,6 +2,10 @@ import { ResolvedActivity, TimeFormat } from '../types/dayflow';
 import type { ActiveReminderItem, StoredReminderState } from '../types/reminder';
 import { formatTimeDisplay, getCurrentLocalMinutes, parseTimeToMinutes } from './dateTime';
 
+import { idbDelete, idbGet, idbPut, STORE_NAMES } from '../services/storage/indexedDb';
+import { publishSyncEvent } from '../services/storage/syncChannel';
+import type { ReminderStoreRecord } from '../services/storage/types';
+
 export type NotificationSupportStatus =
   | 'unsupported'
   | 'granted'
@@ -29,6 +33,7 @@ export async function requestNotificationPermissionFromUser(): Promise<Notificat
 
 const REMINDER_STORAGE_PREFIX = 'dayflow_reminder_state_v1:';
 const RETENTION_MS = 48 * 60 * 60 * 1000;
+const reminderMemoryCache = new Map<string, StoredReminderState>();
 
 export function buildReminderKey(act: Pick<ResolvedActivity, 'instanceId' | 'startTime'>): string {
   return `${act.instanceId}::${act.startTime}`;
@@ -67,39 +72,97 @@ function pruneOldEntries(state: StoredReminderState, nowMs = Date.now()): Stored
   return { dismissedKeys, triggeredKeys, snoozedUntilMs };
 }
 
+function normalizeParsedReminderState(parsed: Partial<StoredReminderState> | null | undefined): StoredReminderState {
+  if (!parsed || typeof parsed !== 'object') return emptyStoredState();
+  return pruneOldEntries({
+    dismissedKeys:
+      parsed.dismissedKeys && typeof parsed.dismissedKeys === 'object'
+        ? parsed.dismissedKeys
+        : {},
+    triggeredKeys:
+      parsed.triggeredKeys && typeof parsed.triggeredKeys === 'object'
+        ? parsed.triggeredKeys
+        : {},
+    snoozedUntilMs:
+      parsed.snoozedUntilMs && typeof parsed.snoozedUntilMs === 'object'
+        ? parsed.snoozedUntilMs
+        : {},
+  });
+}
+
+export async function hydrateReminderStateFromIndexedDb(scopeKey: string): Promise<StoredReminderState> {
+  const normalizedScope = scopeKey || 'guest';
+  try {
+    const rec = await idbGet<ReminderStoreRecord>(STORE_NAMES.REMINDERS, normalizedScope);
+    if (rec?.state) {
+      const pruned = normalizeParsedReminderState(rec.state);
+      reminderMemoryCache.set(normalizedScope, pruned);
+      return pruned;
+    }
+  } catch {
+    // fallback below
+  }
+
+  // Migrate any legacy reminder localStorage entry cleanly into IndexedDB
+  if (typeof window !== 'undefined') {
+    try {
+      const legacyKey = getStorageKey(normalizedScope);
+      const raw = window.localStorage.getItem(legacyKey);
+      if (raw) {
+        const migrated = normalizeParsedReminderState(JSON.parse(raw) as Partial<StoredReminderState>);
+        reminderMemoryCache.set(normalizedScope, migrated);
+        await idbPut(STORE_NAMES.REMINDERS, {
+          scopeKey: normalizedScope,
+          state: migrated,
+          updatedAt: new Date().toISOString(),
+        });
+        window.localStorage.removeItem(legacyKey);
+        return migrated;
+      }
+    } catch {
+      // ignore migration errors
+    }
+  }
+
+  const fresh = emptyStoredState();
+  reminderMemoryCache.set(normalizedScope, fresh);
+  return fresh;
+}
+
 export function loadStoredReminderState(scopeKey: string): StoredReminderState {
+  const normalizedScope = scopeKey || 'guest';
+  const cached = reminderMemoryCache.get(normalizedScope);
+  if (cached) {
+    return pruneOldEntries(cached);
+  }
   if (typeof window === 'undefined') return emptyStoredState();
   try {
-    const raw = window.localStorage.getItem(getStorageKey(scopeKey));
+    const raw = window.localStorage.getItem(getStorageKey(normalizedScope));
     if (!raw) return emptyStoredState();
     const parsed = JSON.parse(raw) as Partial<StoredReminderState>;
-    return pruneOldEntries({
-      dismissedKeys:
-        parsed.dismissedKeys && typeof parsed.dismissedKeys === 'object'
-          ? parsed.dismissedKeys
-          : {},
-      triggeredKeys:
-        parsed.triggeredKeys && typeof parsed.triggeredKeys === 'object'
-          ? parsed.triggeredKeys
-          : {},
-      snoozedUntilMs:
-        parsed.snoozedUntilMs && typeof parsed.snoozedUntilMs === 'object'
-          ? parsed.snoozedUntilMs
-          : {},
-    });
+    const normalized = normalizeParsedReminderState(parsed);
+    reminderMemoryCache.set(normalizedScope, normalized);
+    return normalized;
   } catch {
     return emptyStoredState();
   }
 }
 
 export function saveStoredReminderState(scopeKey: string, state: StoredReminderState): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const pruned = pruneOldEntries(state);
-    window.localStorage.setItem(getStorageKey(scopeKey), JSON.stringify(pruned));
-  } catch {
-    // Ignore storage quota errors
-  }
+  const normalizedScope = scopeKey || 'guest';
+  const pruned = pruneOldEntries(state);
+  reminderMemoryCache.set(normalizedScope, pruned);
+  void idbPut(STORE_NAMES.REMINDERS, {
+    scopeKey: normalizedScope,
+    state: pruned,
+    updatedAt: new Date().toISOString(),
+  })
+    .then(() => {
+      publishSyncEvent('reminders', { detail: normalizedScope });
+    })
+    .catch(() => {
+      // ignore IndexedDB transient write errors
+    });
 }
 
 export function markReminderDismissed(scopeKey: string, key: string): void {
@@ -144,11 +207,15 @@ export function clearReminderKeysForActivityIds(scopeKey: string, activityIds: s
 }
 
 export function clearAllReminderStateForScope(scopeKey: string): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.removeItem(getStorageKey(scopeKey));
-  } catch {
-    // Ignore storage errors
+  const normalizedScope = scopeKey || 'guest';
+  reminderMemoryCache.delete(normalizedScope);
+  void idbDelete(STORE_NAMES.REMINDERS, normalizedScope).catch(() => undefined);
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.removeItem(getStorageKey(normalizedScope));
+    } catch {
+      // Ignore storage errors
+    }
   }
 }
 

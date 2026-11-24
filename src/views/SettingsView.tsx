@@ -1,13 +1,38 @@
-import React, { useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BiIcon } from '../components/ui/BiIcon';
 import { useDayFlow } from '../context/DayFlowContext';
 import { useAuth } from '../hooks/useAuth';
+import {
+  deleteLibraryResourceApi,
+  listLibraryResourcesApi,
+  runLibraryOrphanCleanup,
+} from '../services/libraryService';
+import {
+  blobStore,
+  requestPersistentStorageSafely,
+} from '../services/storage/blobStore';
+import { subscribeSyncChannel } from '../services/storage/syncChannel';
+import type { StorageQuotaReport } from '../services/storage/types';
 import { TimeFormat, WeekStartDay } from '../types/dayflow';
+import type { LibraryResource } from '../types/library';
 import {
   getNotificationPermissionStatus,
   requestNotificationPermissionFromUser,
 } from '../utils/notifications';
 import { THEME_OPTIONS } from '../utils/theme';
+
+function formatStorageBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) {
+    return 'Managed by device';
+  }
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
+}
 
 export const SettingsView: React.FC = () => {
   const {
@@ -21,8 +46,8 @@ export const SettingsView: React.FC = () => {
   const {
     state,
     updateSettings,
-    exportBackup,
-    importBackup,
+    exportFullBackup,
+    importFullBackup,
     clearAllData,
     pushToast,
   } = useDayFlow();
@@ -31,6 +56,40 @@ export const SettingsView: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [notifStatus, setNotifStatus] = useState(getNotificationPermissionStatus);
+
+  const [storageReport, setStorageReport] = useState<StorageQuotaReport | null>(null);
+  const [savedResources, setSavedResources] = useState<LibraryResource[]>([]);
+  const [loadingStorage, setLoadingStorage] = useState(true);
+  const [cleaningCache, setCleaningCache] = useState(false);
+  const [exportingBackup, setExportingBackup] = useState(false);
+  const [importingBackup, setImportingBackup] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingResourceId, setDeletingResourceId] = useState<string | null>(null);
+
+  const refreshStorageStats = useCallback(async () => {
+    try {
+      const [diag, resources] = await Promise.all([
+        blobStore.getStorageDiagnostics(),
+        listLibraryResourcesApi(),
+      ]);
+      setStorageReport(diag);
+      setSavedResources(resources);
+    } catch {
+      // Keep UI functional even if diagnostics fail temporarily
+    } finally {
+      setLoadingStorage(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStorageStats();
+    return subscribeSyncChannel(
+      ['workspace', 'library', 'eku_chat', 'research', 'storage_reset'],
+      () => {
+        void refreshStorageStats();
+      }
+    );
+  }, [refreshStorageStats, state.activities.length, state.tasks.length, state.notes.length]);
 
   const handleEnableNotifications = async () => {
     const result = await requestNotificationPermissionFromUser();
@@ -58,57 +117,135 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const handleExport = () => {
-    const json = exportBackup();
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `dayflow-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+  const handleRequestPersistence = async () => {
+    const granted = await requestPersistentStorageSafely();
+    await refreshStorageStats();
     pushToast({
-      type: 'success',
-      title: 'Backup downloaded',
-      description: 'Saved JSON snapshot to your device.',
+      type: granted ? 'success' : 'info',
+      title: granted ? 'Offline protection active' : 'Standard browser storage active',
+      description: granted
+        ? 'Your browser marked this device storage as persistent.'
+        : 'Your browser decides storage retention automatically on this device.',
     });
+  };
+
+  const handleCleanupCache = async () => {
+    setCleaningCache(true);
+    try {
+      const removed = await runLibraryOrphanCleanup();
+      await refreshStorageStats();
+      pushToast({
+        type: 'success',
+        title: 'Temporary cache cleaned',
+        description:
+          removed > 0
+            ? `Cleared ${removed} unused temporary ${removed === 1 ? 'file' : 'files'}. Saved PDFs were untouched.`
+            : 'No unused temporary files were found.',
+      });
+    } finally {
+      setCleaningCache(false);
+    }
+  };
+
+  const handleDeleteSavedResource = async (resourceId: string) => {
+    setDeletingResourceId(resourceId);
+    try {
+      await deleteLibraryResourceApi(
+        {
+          accessToken: null,
+          isGuest: true,
+        },
+        resourceId
+      );
+      setConfirmDeleteId(null);
+      await refreshStorageStats();
+      pushToast({
+        type: 'success',
+        title: 'Resource removed',
+        description: 'Deleted from your device Library and freed its storage space.',
+      });
+    } catch (err) {
+      pushToast({
+        type: 'error',
+        title: 'Could not delete resource',
+        description: err instanceof Error ? err.message : 'Please try again.',
+      });
+    } finally {
+      setDeletingResourceId(null);
+    }
+  };
+
+  const handleExport = async () => {
+    setExportingBackup(true);
+    try {
+      const json = await exportFullBackup();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `ekagra-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      pushToast({
+        type: 'success',
+        title: 'Backup downloaded',
+        description: 'Saved your schedules, notes, library metadata, and Eku history to this device.',
+      });
+    } finally {
+      setExportingBackup(false);
+    }
   };
 
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setImportingBackup(true);
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
-        importBackup(String(reader.result ?? ''));
+        await importFullBackup(String(reader.result ?? ''));
+        await refreshStorageStats();
         pushToast({
           type: 'success',
           title: 'Backup restored',
-          description: 'Your data has been imported.',
+          description: 'Your workspace data has been imported safely.',
         });
       } catch (err) {
         pushToast({
           type: 'error',
-          title: 'Import failed',
+          title: 'Restore failed',
           description:
-            err instanceof Error ? err.message : 'Invalid Ekagra backup file.',
+            err instanceof Error
+              ? err.message
+              : 'Invalid Ekagra backup file. Your existing data was left untouched.',
         });
       } finally {
+        setImportingBackup(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
       }
+    };
+    reader.onerror = () => {
+      setImportingBackup(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      pushToast({
+        type: 'error',
+        title: 'Restore failed',
+        description: 'Could not read the selected backup file.',
+      });
     };
     reader.readAsText(file);
   };
 
-  const handleConfirmClear = () => {
-    clearAllData();
+  const handleConfirmClear = async () => {
+    await clearAllData();
+    await refreshStorageStats();
     setConfirmClearOpen(false);
     pushToast({
       type: 'info',
-      title: 'Data cleared',
-      description: 'Ekagra has been reset.',
+      title: 'Workspace reset',
+      description: 'Schedules, tasks, habits, and assistant history have been cleared.',
     });
   };
 
@@ -269,10 +406,10 @@ export const SettingsView: React.FC = () => {
                 htmlFor="pref-auto-sync-pdf"
                 className="block cursor-pointer text-sm font-medium text-[var(--df-text)]"
               >
-                Strict schedule PDF validation &amp; duplicate guard
+                Auto-sync verified schedule PDFs to Calendar
               </label>
               <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
-                Schedule PDF imports always require explicit calendar dates, study times, and topics, followed by preview confirmation before adding events.
+                When enabled, unambiguous study sessions with explicit calendar dates and times automatically sync to your Calendar upon upload (duplicates are skipped and overlapping times stay highlighted for review).
               </p>
             </div>
             <input
@@ -438,28 +575,46 @@ export const SettingsView: React.FC = () => {
         </div>
       </section>
 
-      {/* Data & Backups */}
+      {/* Storage Management & Backups */}
       <section className="rounded-3xl border border-[var(--df-border)] bg-[var(--df-surface)] p-5">
-        <div className="flex items-center gap-2 border-b border-[var(--df-border)] pb-3">
-          {authStatus === 'authenticated' ? (
-            <BiIcon name="cloud-check" className="text-sm text-[var(--df-accent-soft-fg)]" />
-          ) : (
-            <BiIcon name="hdd" className="text-sm text-[var(--df-text-muted)]" />
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--df-border)] pb-3">
+          <div className="flex items-center gap-2">
+            {authStatus === 'authenticated' ? (
+              <BiIcon name="cloud-check" className="text-sm text-[var(--df-accent-soft-fg)]" />
+            ) : (
+              <BiIcon name="hdd" className="text-sm text-[var(--df-text-muted)]" />
+            )}
+            <h2 className="text-sm font-semibold text-[var(--df-text)]">
+              {authStatus === 'authenticated'
+                ? 'Account, Storage & Backups'
+                : 'Device Storage & Backups'}
+            </h2>
+          </div>
+
+          {storageReport && (
+            <span className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--df-bg)] px-2.5 py-1 text-[11px] font-medium text-[var(--df-text-muted)]">
+              <BiIcon
+                name={storageReport.isPersisted ? 'shield-check' : 'check-circle'}
+                className="text-xs text-[var(--df-accent-soft-fg)]"
+              />
+              {storageReport.isPersisted ? 'Protected offline' : 'Available offline'}
+            </span>
           )}
-          <h2 className="text-sm font-semibold text-[var(--df-text)]">
-            {authStatus === 'authenticated' ? 'Cloud account & backups' : 'Local data & backups'}
-          </h2>
         </div>
 
-        <div className="mt-4 space-y-4">
+        <div className="mt-4 space-y-5">
           {authStatus === 'authenticated' ? (
             <p className="rounded-2xl bg-[var(--df-bg)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--df-text-muted)]">
-              Signed in as <span className="font-medium text-[var(--df-text)]">{user?.email || 'your Ekagra account'}</span>. Your Ekagra workspace is isolated to your Supabase account and never mixed with local guest data.
+              Signed in as{' '}
+              <span className="font-medium text-[var(--df-text)]">
+                {user?.email || 'your Ekagra account'}
+              </span>
+              . Your Ekagra workspace stays isolated from device-only workspace data.
             </p>
           ) : (
-            <div className="flex flex-col justify-between gap-3 rounded-2xl bg-[var(--df-bg)] px-3.5 py-2.5 sm:flex-row sm:items-center">
+            <div className="flex flex-col justify-between gap-3 rounded-2xl bg-[var(--df-bg)] px-3.5 py-3 sm:flex-row sm:items-center">
               <p className="text-xs leading-relaxed text-[var(--df-text-muted)]">
-                Guest mode saves everything only in this browser&apos;s <span className="font-mono">localStorage</span> and is not backed up online. Export a JSON backup anytime.
+                All schedules, tasks, notes, assistant history, and saved Library PDFs are stored on this device and work offline. Data is not automatically backed up to the cloud — export a backup file anytime.
               </p>
               {isSupabaseConfigured && (
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -486,23 +641,164 @@ export const SettingsView: React.FC = () => {
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-2.5">
+          {/* Storage Usage Metrics */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+                Storage Overview
+              </h3>
+              {storageReport && !storageReport.isPersisted && (
+                <button
+                  type="button"
+                  onClick={() => void handleRequestPersistence()}
+                  className="text-[11px] font-semibold text-[var(--df-accent-soft-fg)] hover:underline"
+                >
+                  Protect offline storage
+                </button>
+              )}
+            </div>
+
+            {loadingStorage ? (
+              <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 py-3 text-xs text-[var(--df-text-muted)]">
+                Checking device storage usage...
+              </div>
+            ) : storageReport ? (
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+                <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+                  <p className="text-[11px] text-[var(--df-text-muted)]">Total storage used</p>
+                  <p className="mt-1 font-mono text-sm font-bold tabular-nums text-[var(--df-text)]">
+                    {formatStorageBytes(storageReport.totalUsedBytes)}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+                  <p className="text-[11px] text-[var(--df-text-muted)]">Saved resources</p>
+                  <p className="mt-1 font-mono text-sm font-bold tabular-nums text-[var(--df-text)]">
+                    {storageReport.savedResourcesCount}
+                    <span className="ml-1.5 text-[11px] font-normal text-[var(--df-text-muted)]">
+                      ({storageReport.pdfCount} PDF · {storageReport.linkCount} link)
+                    </span>
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+                  <p className="text-[11px] text-[var(--df-text-muted)]">Available space</p>
+                  <p className="mt-1 font-mono text-sm font-bold tabular-nums text-[var(--df-text)]">
+                    {formatStorageBytes(storageReport.estimatedAvailableBytes)}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+                  <p className="text-[11px] text-[var(--df-text-muted)]">PDF storage</p>
+                  <p className="mt-1 font-mono text-sm font-bold tabular-nums text-[var(--df-text)]">
+                    {formatStorageBytes(storageReport.pdfBytes)}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+                  <p className="text-[11px] text-[var(--df-text-muted)]">App data usage</p>
+                  <p className="mt-1 font-mono text-sm font-bold tabular-nums text-[var(--df-text)]">
+                    {formatStorageBytes(storageReport.appDataBytes)}
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-between rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3">
+                  <div>
+                    <p className="text-[11px] text-[var(--df-text-muted)]">Temp cache</p>
+                    <p className="mt-0.5 text-xs font-semibold text-[var(--df-text)]">
+                      {formatStorageBytes(storageReport.coverAndCacheBytes)}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={cleaningCache}
+                    onClick={() => void handleCleanupCache()}
+                    className="rounded-xl border border-[var(--df-border-strong)] bg-[var(--df-surface)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--df-text)] hover:border-[var(--df-accent)] disabled:opacity-60"
+                  >
+                    {cleaningCache ? 'Cleaning...' : 'Clean cache'}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          {/* Individual Saved Resources List */}
+          {savedResources.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+                Saved Library Resources ({savedResources.length})
+              </h3>
+              <div className="max-h-56 divide-y divide-[var(--df-border)] overflow-y-auto rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)]">
+                {savedResources.map((res) => (
+                  <div
+                    key={res.id}
+                    className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-xs"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-semibold text-[var(--df-text)]">
+                        {res.title}
+                      </p>
+                      <p className="truncate text-[11px] text-[var(--df-text-muted)]">
+                        {res.resourceType === 'pdf' ? 'PDF' : 'Study link'} · {res.subject}
+                        {res.originalFileSize ? ` · ${formatStorageBytes(res.originalFileSize)}` : ''}
+                      </p>
+                    </div>
+
+                    {confirmDeleteId === res.id ? (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={deletingResourceId === res.id}
+                          onClick={() => void handleDeleteSavedResource(res.id)}
+                          className="rounded-lg bg-rose-600 px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
+                        >
+                          {deletingResourceId === res.id ? 'Removing...' : 'Confirm'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="rounded-lg border border-[var(--df-border)] px-2 py-1 text-[11px] font-medium text-[var(--df-text-muted)]"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(res.id)}
+                        aria-label={`Delete ${res.title}`}
+                        className="inline-flex h-8 shrink-0 items-center gap-1 rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 text-[11px] font-medium text-[var(--df-text-muted)] hover:border-rose-400 hover:text-rose-500"
+                      >
+                        <BiIcon name="trash3" className="text-xs" />
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Backup, Restore & Reset */}
+          <div className="flex flex-wrap items-center gap-2.5 border-t border-[var(--df-border)] pt-4">
             <button
               type="button"
-              onClick={handleExport}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)]"
+              disabled={exportingBackup}
+              onClick={() => void handleExport()}
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)] disabled:opacity-60"
             >
               <BiIcon name="download" className="text-xs" />
-              Export JSON
+              {exportingBackup ? 'Preparing backup...' : 'Export Backup JSON'}
             </button>
 
             <button
               type="button"
+              disabled={importingBackup}
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)]"
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[var(--df-border)] bg-[var(--df-bg)] px-4 text-xs font-semibold text-[var(--df-text)] hover:border-[var(--df-border-strong)] disabled:opacity-60"
             >
               <BiIcon name="upload" className="text-xs" />
-              Import JSON
+              {importingBackup ? 'Restoring...' : 'Restore Backup JSON'}
             </button>
 
             <input
@@ -519,7 +815,7 @@ export const SettingsView: React.FC = () => {
               className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-rose-300 px-4 text-xs font-semibold text-rose-600 hover:bg-rose-500/10 dark:border-rose-900/50 dark:text-rose-400"
             >
               <BiIcon name="trash3" className="text-xs" />
-              Reset data
+              Reset workspace data
             </button>
           </div>
         </div>
@@ -537,13 +833,13 @@ export const SettingsView: React.FC = () => {
             <div className="flex items-center gap-2 text-rose-600 dark:text-rose-400">
               <BiIcon name="exclamation-triangle" className="text-base shrink-0" />
               <h3 id="clear-data-title" className="font-display text-base font-bold text-[var(--df-text)]">
-                Clear all Ekagra data?
+                Clear all Ekagra workspace data?
               </h3>
             </div>
             <p className="mt-2 text-xs leading-relaxed text-[var(--df-text-muted)]">
               {authStatus === 'authenticated'
                 ? 'This removes all tasks, scheduled blocks, habits, and focus history from your Supabase cloud account.'
-                : 'This removes all tasks, scheduled blocks, habits, and focus history from this browser.'}
+                : 'This clears all tasks, scheduled blocks, habits, focus history, and assistant conversations from this device.'}
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button
@@ -555,7 +851,7 @@ export const SettingsView: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={handleConfirmClear}
+                onClick={() => void handleConfirmClear()}
                 className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white"
               >
                 Yes, clear all

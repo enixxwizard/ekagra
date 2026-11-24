@@ -12,6 +12,25 @@ import {
 } from '../../types/dayflow';
 import { generateId, getTodayISO, shiftDateISO } from '../../utils/dateTime';
 import { normalizeThemeMode } from '../../utils/theme';
+import type { LibraryResource } from '../../types/library';
+import {
+  idbGet,
+  idbGetAll,
+  idbPut,
+  idbReplaceStore,
+  idbSaveWorkspaceBundle,
+  STORE_NAMES,
+} from './indexedDb';
+import { preferencesStore } from './preferencesStore';
+import { publishSyncEvent } from './syncChannel';
+import type {
+  BackupBundleV2,
+  EkuConversationRecord,
+  HabitLogRecord,
+  ReminderStoreRecord,
+  SavedResearchRecord,
+  WorkspaceMetaRecord,
+} from './types';
 
 export const STORAGE_KEY = 'dayflow_app_state_v1';
 export const CURRENT_SCHEMA_VERSION = 1;
@@ -699,46 +718,240 @@ function validateAndSanitizeState(raw: unknown): DayFlowState {
   };
 }
 
-export class LocalStorageRepository implements IDataRepository {
+export const IDB_MIGRATED_FLAG = 'ekagra_idb_migrated_v1';
+
+function buildWorkspaceBundle(state: DayFlowState) {
+  const habitLogs: HabitLogRecord[] = Object.entries(state.habitLogs).map(([date, habitIds]) => ({
+    date,
+    habitIds,
+  }));
+
+  const meta: WorkspaceMetaRecord = {
+    id: 'singleton',
+    version: state.version,
+    settings: state.settings,
+    activeTimer: state.activeTimer,
+    importedFingerprints: state.importedFingerprints,
+    updatedAt: new Date().toISOString(),
+  };
+
+  return {
+    meta,
+    activities: state.activities,
+    tasks: state.tasks,
+    habits: state.habits,
+    habitLogs,
+    focusSessions: state.focusSessions,
+    notes: state.notes,
+    quotations: state.quotations,
+  };
+}
+
+async function readWorkspaceStateFromIdb(): Promise<DayFlowState | null> {
+  const meta = await idbGet<WorkspaceMetaRecord>(STORE_NAMES.WORKSPACE_META, 'singleton');
+  if (!meta) return null;
+
+  const [activities, tasks, habits, habitLogRows, focusSessions, notes, quotations] =
+    await Promise.all([
+      idbGetAll<ScheduleActivity>(STORE_NAMES.ACTIVITIES),
+      idbGetAll<TaskItem>(STORE_NAMES.TASKS),
+      idbGetAll<HabitItem>(STORE_NAMES.HABITS),
+      idbGetAll<HabitLogRecord>(STORE_NAMES.HABIT_LOGS),
+      idbGetAll<FocusSession>(STORE_NAMES.FOCUS_SESSIONS),
+      idbGetAll<QuickNote>(STORE_NAMES.NOTES),
+      idbGetAll<StudyQuotation>(STORE_NAMES.QUOTATIONS),
+    ]);
+
+  const habitLogs: Record<string, string[]> = {};
+  for (const row of habitLogRows) {
+    if (row?.date && Array.isArray(row.habitIds)) {
+      habitLogs[row.date] = row.habitIds;
+    }
+  }
+
+  return validateAndSanitizeState({
+    version: meta.version,
+    settings: meta.settings,
+    activeTimer: meta.activeTimer,
+    importedFingerprints: meta.importedFingerprints,
+    activities,
+    tasks,
+    habits,
+    habitLogs,
+    focusSessions,
+    notes,
+    quotations,
+  });
+}
+
+function readLegacyLocalStorageState(): {
+  found: boolean;
+  state: DayFlowState | null;
+  corrupt: boolean;
+} {
+  if (typeof window === 'undefined') {
+    return { found: false, state: null, corrupt: false };
+  }
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { found: false, state: null, corrupt: false };
+    const parsed = JSON.parse(raw);
+    const validated = validateAndSanitizeState(parsed);
+    return { found: true, state: validated, corrupt: false };
+  } catch {
+    return { found: true, state: null, corrupt: true };
+  }
+}
+
+export class HybridLocalRepository implements IDataRepository {
+  private memoryCache: DayFlowState | null = null;
+  private saveQueue: Promise<void> = Promise.resolve();
+
   load(): { state: DayFlowState; recoveredFromCorruption: boolean } {
+    if (this.memoryCache) {
+      return { state: this.memoryCache, recoveredFromCorruption: false };
+    }
+    const legacy = readLegacyLocalStorageState();
+    if (legacy.state) {
+      this.memoryCache = legacy.state;
+      preferencesStore.syncFromSettings(legacy.state.settings);
+      return { state: legacy.state, recoveredFromCorruption: false };
+    }
+    const seeded = createSeedState();
+    this.memoryCache = seeded;
+    preferencesStore.syncFromSettings(seeded.settings);
+    return { state: seeded, recoveredFromCorruption: legacy.corrupt };
+  }
+
+  async loadAsync(): Promise<{
+    state: DayFlowState;
+    recoveredFromCorruption: boolean;
+    migratedFromLegacy: boolean;
+  }> {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        const seeded = createSeedState();
-        this.save(seeded);
-        return { state: seeded, recoveredFromCorruption: false };
-      }
-      const parsed = JSON.parse(raw);
-      const validated = validateAndSanitizeState(parsed);
-      return { state: validated, recoveredFromCorruption: false };
-    } catch {
-      try {
-        const corrupt = localStorage.getItem(STORAGE_KEY);
-        if (corrupt) {
-          localStorage.setItem(`${STORAGE_KEY}_corrupt_backup`, corrupt);
+      const existingInIdb = await readWorkspaceStateFromIdb();
+      if (existingInIdb) {
+        this.memoryCache = existingInIdb;
+        preferencesStore.syncFromSettings(existingInIdb.settings);
+        if (typeof window !== 'undefined') {
+          try {
+            if (!window.localStorage.getItem(IDB_MIGRATED_FLAG)) {
+              window.localStorage.setItem(IDB_MIGRATED_FLAG, 'true');
+            }
+          } catch {
+            // ignore
+          }
         }
-      } catch {
-        // Ignore quarantine error
+        return {
+          state: existingInIdb,
+          recoveredFromCorruption: false,
+          migratedFromLegacy: false,
+        };
       }
-      const fresh = createSeedState();
-      this.save(fresh);
-      return { state: fresh, recoveredFromCorruption: true };
+
+      // Check for legacy pre-IndexedDB workspace data in localStorage
+      const legacy = readLegacyLocalStorageState();
+      if (legacy.found && legacy.state) {
+        const bundle = buildWorkspaceBundle(legacy.state);
+        await idbSaveWorkspaceBundle(bundle);
+        this.memoryCache = legacy.state;
+        preferencesStore.syncFromSettings(legacy.state.settings);
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem(IDB_MIGRATED_FLAG, 'true');
+            window.localStorage.removeItem(STORAGE_KEY);
+          } catch {
+            // ignore
+          }
+        }
+        return {
+          state: legacy.state,
+          recoveredFromCorruption: false,
+          migratedFromLegacy: true,
+        };
+      }
+
+      if (legacy.found && legacy.corrupt) {
+        const recovered = createSeedState();
+        await idbSaveWorkspaceBundle(buildWorkspaceBundle(recovered));
+        this.memoryCache = recovered;
+        preferencesStore.syncFromSettings(recovered.settings);
+        if (typeof window !== 'undefined') {
+          try {
+            const rawCorrupt = window.localStorage.getItem(STORAGE_KEY);
+            if (rawCorrupt) {
+              window.localStorage.setItem(`${STORAGE_KEY}_corrupt_backup`, rawCorrupt);
+            }
+            window.localStorage.removeItem(STORAGE_KEY);
+            window.localStorage.setItem(IDB_MIGRATED_FLAG, 'true');
+          } catch {
+            // ignore
+          }
+        }
+        return {
+          state: recovered,
+          recoveredFromCorruption: true,
+          migratedFromLegacy: false,
+        };
+      }
+
+      // Fresh install: seed starter demo workspace into IndexedDB
+      const seeded = createSeedState();
+      await idbSaveWorkspaceBundle(buildWorkspaceBundle(seeded));
+      this.memoryCache = seeded;
+      preferencesStore.syncFromSettings(seeded.settings);
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(IDB_MIGRATED_FLAG, 'true');
+        } catch {
+          // ignore
+        }
+      }
+      return {
+        state: seeded,
+        recoveredFromCorruption: false,
+        migratedFromLegacy: false,
+      };
+    } catch {
+      const fallback = this.load();
+      return {
+        state: fallback.state,
+        recoveredFromCorruption: fallback.recoveredFromCorruption,
+        migratedFromLegacy: false,
+      };
     }
   }
 
   save(state: DayFlowState): void {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // Ignore quota exceeded silently
-    }
+    this.memoryCache = state;
+    preferencesStore.syncFromSettings(state.settings);
+    this.saveQueue = this.saveQueue
+      .then(async () => {
+        await idbSaveWorkspaceBundle(buildWorkspaceBundle(state));
+        publishSyncEvent('workspace');
+      })
+      .catch(() => {
+        // Handled cleanly in saveAsync callers when explicit await is needed
+      });
+  }
+
+  async saveAsync(state: DayFlowState): Promise<void> {
+    this.memoryCache = state;
+    preferencesStore.syncFromSettings(state.settings);
+    const pending = this.saveQueue.then(async () => {
+      await idbSaveWorkspaceBundle(buildWorkspaceBundle(state));
+      publishSyncEvent('workspace');
+    });
+    this.saveQueue = pending.catch(() => undefined);
+    await pending;
   }
 
   exportJSON(state: DayFlowState): string {
     return JSON.stringify(
       {
         exportedAt: new Date().toISOString(),
-        app: 'DayFlow',
+        app: 'Ekagra',
+        backupVersion: 1,
         data: state,
       },
       null,
@@ -746,10 +959,118 @@ export class LocalStorageRepository implements IDataRepository {
     );
   }
 
+  async exportFullBackupJson(state: DayFlowState): Promise<string> {
+    const [libraryResources, aiConversations, researchResults, reminders] = await Promise.all([
+      idbGetAll<LibraryResource>(STORE_NAMES.LIBRARY_RESOURCES).catch(() => []),
+      idbGetAll<EkuConversationRecord>(STORE_NAMES.AI_CONVERSATIONS).catch(() => []),
+      idbGetAll<SavedResearchRecord>(STORE_NAMES.RESEARCH_RESULTS).catch(() => []),
+      idbGetAll<ReminderStoreRecord>(STORE_NAMES.REMINDERS).catch(() => []),
+    ]);
+
+    const bundle: BackupBundleV2 = {
+      backupVersion: 2,
+      exportedAt: new Date().toISOString(),
+      app: 'Ekagra',
+      data: state,
+      libraryResources,
+      aiConversations,
+      researchResults,
+      reminders,
+    };
+
+    return JSON.stringify(bundle, null, 2);
+  }
+
   parseAndValidateImport(rawJson: string): DayFlowState {
     const parsed = JSON.parse(rawJson);
-    const payload = isObject(parsed) && isObject(parsed.data) ? parsed.data : parsed;
+    if (!isObject(parsed)) {
+      throw new Error('Backup file must contain a valid JSON object.');
+    }
+    const payload = isObject(parsed.data) ? parsed.data : parsed;
+    if (
+      !Array.isArray(payload.activities) &&
+      !Array.isArray(payload.tasks) &&
+      !isObject(payload.settings)
+    ) {
+      throw new Error('This JSON file does not match an Ekagra backup snapshot.');
+    }
     return validateAndSanitizeState(payload);
+  }
+
+  async importFullBackupAsync(rawJson: string): Promise<DayFlowState> {
+    // 1. Parse & validate strictly BEFORE modifying any stored data
+    let parsedRaw: unknown;
+    try {
+      parsedRaw = JSON.parse(rawJson);
+    } catch {
+      throw new Error('Invalid JSON file. Could not parse backup contents.');
+    }
+
+    if (!isObject(parsedRaw)) {
+      throw new Error('Backup file is malformed.');
+    }
+
+    const validatedWorkspace = this.parseAndValidateImport(rawJson);
+
+    const libraryResources: LibraryResource[] = Array.isArray(parsedRaw.libraryResources)
+      ? (parsedRaw.libraryResources as LibraryResource[]).filter(
+          (r) => isObject(r) && typeof r.id === 'string' && typeof r.title === 'string'
+        )
+      : [];
+
+    const aiConversations: EkuConversationRecord[] = Array.isArray(parsedRaw.aiConversations)
+      ? (parsedRaw.aiConversations as EkuConversationRecord[]).filter(
+          (c) => isObject(c) && typeof c.id === 'string' && Array.isArray(c.messages)
+        )
+      : [];
+
+    const researchResults: SavedResearchRecord[] = Array.isArray(parsedRaw.researchResults)
+      ? (parsedRaw.researchResults as SavedResearchRecord[]).filter(
+          (r) => isObject(r) && typeof r.id === 'string' && isObject(r.resource)
+        )
+      : [];
+
+    const reminders: ReminderStoreRecord[] = Array.isArray(parsedRaw.reminders)
+      ? (parsedRaw.reminders as ReminderStoreRecord[]).filter(
+          (r) => isObject(r) && typeof r.scopeKey === 'string' && isObject(r.state)
+        )
+      : [];
+
+    // 2. Commit validated workspace & companion stores transactionally
+    await this.saveAsync(validatedWorkspace);
+
+    if (Array.isArray(parsedRaw.libraryResources)) {
+      // Preserve existing PDF binary references if matching resources already exist locally
+      const existingLib = await idbGetAll<LibraryResource>(STORE_NAMES.LIBRARY_RESOURCES);
+      const existingById = new Map(existingLib.map((r) => [r.id, r]));
+      const mergedLib = libraryResources.map((incoming) => {
+        const local = existingById.get(incoming.id);
+        return local ? { ...incoming, originalFileReference: local.originalFileReference } : incoming;
+      });
+      await idbReplaceStore(STORE_NAMES.LIBRARY_RESOURCES, mergedLib);
+      publishSyncEvent('library');
+    }
+
+    if (Array.isArray(parsedRaw.aiConversations)) {
+      for (const conv of aiConversations) {
+        await idbPut(STORE_NAMES.AI_CONVERSATIONS, conv);
+      }
+      publishSyncEvent('eku_chat');
+    }
+
+    if (Array.isArray(parsedRaw.researchResults)) {
+      await idbReplaceStore(STORE_NAMES.RESEARCH_RESULTS, researchResults);
+      publishSyncEvent('research');
+    }
+
+    if (Array.isArray(parsedRaw.reminders)) {
+      for (const rem of reminders) {
+        await idbPut(STORE_NAMES.REMINDERS, rem);
+      }
+      publishSyncEvent('reminders');
+    }
+
+    return validatedWorkspace;
   }
 
   clear(): DayFlowState {
@@ -757,6 +1078,14 @@ export class LocalStorageRepository implements IDataRepository {
     this.save(empty);
     return empty;
   }
+
+  async clearAsync(): Promise<DayFlowState> {
+    const empty = createEmptyState();
+    await this.saveAsync(empty);
+    return empty;
+  }
 }
 
-export const dayFlowRepository: IDataRepository = new LocalStorageRepository();
+export const hybridLocalRepository = new HybridLocalRepository();
+export const dayFlowRepository: IDataRepository = hybridLocalRepository;
+

@@ -150,11 +150,11 @@ export const UserMenu: React.FC = () => {
             <>
               <div className="border-b border-[var(--df-border)] px-2.5 py-2">
                 <p className="text-xs font-semibold text-[var(--df-text)]">
-                  Guest Mode
+                  Local Workspace
                 </p>
                 <p className="mt-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--df-text-muted)]">
                   <BiIcon name="hdd" className="mt-0.5 text-xs shrink-0" />
-                  Saved in this browser only. Not backed up online.
+                  Stored on this device and works offline. Not automatically backed up online.
                 </p>
               </div>
 
@@ -187,7 +187,7 @@ export const UserMenu: React.FC = () => {
                   </>
                 ) : (
                   <p className="rounded-xl bg-[var(--df-bg)] px-2.5 py-2 text-[11px] text-[var(--df-text-muted)]">
-                    Configure Supabase env vars to enable Google &amp; Email sign-in.
+                    Cloud account sync will be available in an upcoming release.
                   </p>
                 )}
 

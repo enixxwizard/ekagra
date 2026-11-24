@@ -255,23 +255,27 @@ export function extractExplicitStudyTimeRange(
   }
 
   // 1. Explicit range (e.g., 9:00 AM–11:00 AM, 19:00-20:30)
+  // Strip ISO/numeric dates first and scan globally so "2026-11-28" or "1-2"
+  // never causes an early return before matching the actual time range on the line.
+  const lineWithoutNumericDates = line
+    .replace(/\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b/g, ' ')
+    .replace(/\b\d{1,2}[-/]\d{1,2}[-/]20\d{2}\b/g, ' ');
   const rangeRegex =
-    /\b(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?\s*(?:-|–|—|to)\s*(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?\b/i;
-  const rangeMatch = rangeRegex.exec(line);
-  if (rangeMatch) {
+    /\b(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?\s*(?:-|–|—|to)\s*(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?\b/gi;
+  let rangeMatch: RegExpExecArray | null;
+  while ((rangeMatch = rangeRegex.exec(lineWithoutNumericDates)) !== null) {
     // Reject bare integer ratios/chapter ranges like "1-3", "10-12" when neither has :mm nor am/pm
     const hasMinutesOrMeridiem = Boolean(
       rangeMatch[2] || rangeMatch[3] || rangeMatch[5] || rangeMatch[6]
     );
-    if (hasMinutesOrMeridiem) {
-      const parsed = parseTimeRangeString(rangeMatch[0], previousEndMinutes);
-      if (parsed && timeToMinutes(parsed.endTime) > timeToMinutes(parsed.startTime)) {
-        return {
-          startTime: parsed.startTime,
-          endTime: parsed.endTime,
-          matchedRaw: rangeMatch[0],
-        };
-      }
+    if (!hasMinutesOrMeridiem) continue;
+    const parsed = parseTimeRangeString(rangeMatch[0], previousEndMinutes);
+    if (parsed && timeToMinutes(parsed.endTime) > timeToMinutes(parsed.startTime)) {
+      return {
+        startTime: parsed.startTime,
+        endTime: parsed.endTime,
+        matchedRaw: rangeMatch[0],
+      };
     }
   }
 

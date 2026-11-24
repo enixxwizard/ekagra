@@ -2,6 +2,17 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useDayFlow } from '../../context/DayFlowContext';
 import { useAuth } from '../../hooks/useAuth';
 import { useEkuVoice } from '../../hooks/useEkuVoice';
+import {
+  clearEkuMessages,
+  clearSavedResearchResults,
+  deleteSavedResearchResult,
+  loadEkuMessages,
+  loadSavedResearchResults,
+  saveEkuMessages,
+  saveEkuResearchResults,
+} from '../../services/storage/ekuHistoryStore';
+import { subscribeSyncChannel } from '../../services/storage/syncChannel';
+import type { SavedResearchRecord } from '../../services/storage/types';
 import type {
   EkuAvatarEmotion,
   EkuChatMessage,
@@ -48,6 +59,13 @@ function isSafeHttpsLink(rawUrl: string): boolean {
   }
 }
 
+const buildWelcomeMessage = (): EkuChatMessage => ({
+  id: 'eku-welcome',
+  role: 'assistant',
+  text: "Hi, I'm Eku! Ask me to organize tomorrow's schedule, start a focus timer, set a study reminder, or find curated resources in your preferred language.",
+  timestamp: new Date().toISOString(),
+});
+
 export const EkuAssistant: React.FC = () => {
   const { status: authStatus, session } = useAuth();
   const {
@@ -67,21 +85,63 @@ export const EkuAssistant: React.FC = () => {
   } = useDayFlow();
 
   const [isOpen, setIsOpen] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<'chat' | 'research'>('chat');
   const [isLoading, setIsLoading] = useState(false);
   const [applyingId, setApplyingId] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState('');
   const [statusEmotion, setStatusEmotion] = useState<EkuAvatarEmotion>('idle');
-  const [messages, setMessages] = useState<EkuChatMessage[]>(() => [
-    {
-      id: 'eku-welcome',
-      role: 'assistant',
-      text: "Hi, I'm Eku! Ask me to organize tomorrow's schedule, start a focus timer, set a study reminder, or find curated resources in your preferred language.",
-      timestamp: new Date().toISOString(),
-    },
-  ]);
+  const [messages, setMessages] = useState<EkuChatMessage[]>(() => [buildWelcomeMessage()]);
+  const [savedResearch, setSavedResearch] = useState<SavedResearchRecord[]>([]);
 
+  const messagesRef = useRef<EkuChatMessage[]>(messages);
+  messagesRef.current = messages;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const commitMessages = (updater: (prev: EkuChatMessage[]) => EkuChatMessage[]) => {
+    const next = updater(messagesRef.current);
+    messagesRef.current = next;
+    setMessages(next);
+    void saveEkuMessages(next);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const hydrate = async () => {
+      const [storedMessages, storedResearch] = await Promise.all([
+        loadEkuMessages(),
+        loadSavedResearchResults(),
+      ]);
+      if (cancelled) return;
+      if (storedMessages.length > 0) {
+        messagesRef.current = storedMessages;
+        setMessages(storedMessages);
+      }
+      setSavedResearch(storedResearch);
+    };
+    void hydrate();
+
+    const unsub = subscribeSyncChannel(['eku_chat', 'research', 'storage_reset'], (event) => {
+      if (event.topic === 'eku_chat' || event.topic === 'storage_reset') {
+        void loadEkuMessages().then((stored) => {
+          if (cancelled) return;
+          const next = stored.length > 0 ? stored : [buildWelcomeMessage()];
+          messagesRef.current = next;
+          setMessages(next);
+        });
+      }
+      if (event.topic === 'research' || event.topic === 'storage_reset') {
+        void loadSavedResearchResults().then((rows) => {
+          if (!cancelled) setSavedResearch(rows);
+        });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, []);
 
   const muted = Boolean(state.settings.ekuMuted);
   const preferredLanguage = state.settings.preferredResourceLanguage ?? null;
@@ -196,7 +256,7 @@ export const EkuAssistant: React.FC = () => {
       .slice(-8)
       .map((m) => ({ role: m.role, content: m.text }));
 
-    setMessages((prev) => [...prev, userMsg]);
+    commitMessages((prev) => [...prev, userMsg]);
     setInputValue('');
     setIsLoading(true);
     setStatusEmotion('thinking');
@@ -268,6 +328,13 @@ export const EkuAssistant: React.FC = () => {
         }
       }
 
+      const resourcesList = Array.isArray(payload.resources) ? payload.resources : [];
+      if (resourcesList.length > 0) {
+        void saveEkuResearchResults(trimmed, resourcesList).then(() =>
+          loadSavedResearchResults().then(setSavedResearch)
+        );
+      }
+
       const assistantMsg: EkuChatMessage = {
         id: generateId(),
         role: 'assistant',
@@ -275,11 +342,11 @@ export const EkuAssistant: React.FC = () => {
         timestamp: new Date().toISOString(),
         proposals: Array.isArray(payload.proposals) ? payload.proposals : [],
         focusActions,
-        resources: Array.isArray(payload.resources) ? payload.resources : [],
+        resources: resourcesList,
         languageNotice: payload.languageNotice ?? null,
       };
 
-      setMessages((prev) => [...prev, assistantMsg]);
+      commitMessages((prev) => [...prev, assistantMsg]);
       setStatusEmotion(payload.emotion === 'success' ? 'success' : 'idle');
 
       if (!muted) {
@@ -291,7 +358,7 @@ export const EkuAssistant: React.FC = () => {
           ? err.message
           : 'Unable to reach Eku right now. Please try again.';
       setStatusEmotion('error');
-      setMessages((prev) => [
+      commitMessages((prev) => [
         ...prev,
         {
           id: generateId(),
@@ -311,7 +378,7 @@ export const EkuAssistant: React.FC = () => {
     proposalId: string,
     nextStatus: 'approved' | 'dismissed'
   ) => {
-    setMessages((prev) =>
+    commitMessages((prev) =>
       prev.map((m) =>
         m.id === messageId
           ? {
@@ -350,7 +417,7 @@ export const EkuAssistant: React.FC = () => {
           title: 'Schedule updated',
           description: `Saved ${res.appliedCount} approved change${res.appliedCount === 1 ? '' : 's'}.`,
         });
-        setMessages((prev) => [
+        commitMessages((prev) => [
           ...prev,
           {
             id: generateId(),
@@ -416,14 +483,15 @@ export const EkuAssistant: React.FC = () => {
 
   const handleClearChat = () => {
     voice.stopSpeaking();
-    setMessages([
-      {
-        id: 'eku-welcome',
-        role: 'assistant',
-        text: "Fresh start! How can I help with your schedule, focus timer, or study resources?",
-        timestamp: new Date().toISOString(),
-      },
-    ]);
+    const resetMsg: EkuChatMessage = {
+      id: 'eku-welcome',
+      role: 'assistant',
+      text: "Fresh start! How can I help with your schedule, focus timer, or study resources?",
+      timestamp: new Date().toISOString(),
+    };
+    messagesRef.current = [resetMsg];
+    setMessages([resetMsg]);
+    void clearEkuMessages();
     setStatusEmotion('idle');
   };
 
@@ -673,10 +741,84 @@ export const EkuAssistant: React.FC = () => {
             </div>
           </div>
 
+          {/* Saved Research Switcher when resources exist */}
+          {savedResearch.length > 0 && (
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--df-border)] bg-[var(--df-bg)] px-3.5 py-1.5 text-[11px]">
+              <div className="inline-flex items-center gap-1 rounded-lg bg-[var(--df-surface-muted)] p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setDrawerTab('chat')}
+                  className={`rounded-md px-2.5 py-1 font-semibold transition-colors ${
+                    drawerTab === 'chat'
+                      ? 'bg-[var(--df-surface)] text-[var(--df-text)]'
+                      : 'text-[var(--df-text-muted)] hover:text-[var(--df-text)]'
+                  }`}
+                >
+                  Chat
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawerTab('research')}
+                  className={`rounded-md px-2.5 py-1 font-semibold transition-colors ${
+                    drawerTab === 'research'
+                      ? 'bg-[var(--df-surface)] text-[var(--df-text)]'
+                      : 'text-[var(--df-text-muted)] hover:text-[var(--df-text)]'
+                  }`}
+                >
+                  Saved Research ({savedResearch.length})
+                </button>
+              </div>
+              {drawerTab === 'research' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void clearSavedResearchResults().then(() => setSavedResearch([]));
+                  }}
+                  className="text-[11px] font-medium text-[var(--df-text-muted)] hover:text-rose-500"
+                >
+                  Clear all
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Saved Research Tab */}
+          {drawerTab === 'research' && (
+            <div className="flex-1 space-y-2.5 overflow-y-auto px-3.5 py-3">
+              {savedResearch.map((rec) => (
+                <div
+                  key={rec.id}
+                  className="rounded-2xl border border-[var(--df-border)] bg-[var(--df-bg)] p-3 text-xs"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--df-text-muted)]">
+                      {rec.topic}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Remove saved resource ${rec.resource.title}`}
+                      onClick={() => {
+                        void deleteSavedResearchResult(rec.id).then(() =>
+                          setSavedResearch((prev) => prev.filter((item) => item.id !== rec.id))
+                        );
+                      }}
+                      className="text-[var(--df-text-muted)] hover:text-rose-500"
+                    >
+                      <BiIcon name="x-lg" className="text-[11px]" />
+                    </button>
+                  </div>
+                  {renderResourceCard(rec.resource)}
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Messages */}
           <div
             ref={scrollRef}
-            className="flex-1 space-y-3 overflow-y-auto px-3.5 py-3"
+            className={`flex-1 space-y-3 overflow-y-auto px-3.5 py-3 ${
+              drawerTab === 'research' ? 'hidden' : ''
+            }`}
           >
             {messages.map((msg) => (
               <div

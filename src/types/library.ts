@@ -42,6 +42,7 @@ export interface LibraryResource {
   originalFileReference: string | null;
   originalFileName: string | null;
   originalFileSize: number | null;
+  fileHash?: string | null;
   originalUrl: string | null;
   generatedCoverReference: string | null;
   coverTemplate: LibraryCoverTemplateId;
@@ -62,6 +63,7 @@ export interface CreateLibraryResourcePayload {
   resourceType: LibraryResourceType;
   originalFileName?: string | null;
   originalFileSize?: number | null;
+  fileHash?: string | null;
   originalUrl?: string | null;
   coverTemplate: LibraryCoverTemplateId;
   totalPages: number | null;

@@ -1,4 +1,9 @@
 import * as pdfjsLib from 'pdfjs-dist';
+import {
+  createFileRangeReader,
+  createLazyPdfRangeTransport,
+  StorageOperationAbortedError,
+} from '../services/storage/blobStore';
 import type {
   LibraryAnalysisStatus,
   LibraryCoverTemplateId,
@@ -286,29 +291,78 @@ function extractTocLinesWithoutFakePages(lines: TextLineItem[]): LibraryTopic[] 
   return tocCandidates;
 }
 
-export async function analyzePdfForLibrary(
-  source: Uint8Array | ArrayBuffer,
-  fileName: string,
-  onProgress?: (progress: LibraryPdfAnalysisProgress) => void
-): Promise<LibraryPdfAnalysisResult> {
+export type PdfBinaryInput =
+  | File
+  | Blob
+  | Uint8Array
+  | ArrayBuffer
+  | {
+      totalBytes: number;
+      createRangeTransport: () => pdfjsLib.PDFDataRangeTransport;
+    };
+
+function openPdfDocumentTask(source: PdfBinaryInput): pdfjsLib.PDFDocumentLoadingTask {
+  if (source instanceof Blob) {
+    const reader = createFileRangeReader(source);
+    const transport = createLazyPdfRangeTransport(source.size, reader);
+    return pdfjsLib.getDocument({
+      range: transport,
+      rangeChunkSize: 131072,
+      disableAutoFetch: source.size > 16 * 1024 * 1024,
+      disableStream: false,
+      useSystemFonts: true,
+    });
+  }
+  if (typeof source === 'object' && 'createRangeTransport' in source) {
+    return pdfjsLib.getDocument({
+      range: source.createRangeTransport(),
+      rangeChunkSize: 131072,
+      disableAutoFetch: source.totalBytes > 16 * 1024 * 1024,
+      disableStream: false,
+      useSystemFonts: true,
+    });
+  }
   const bytes = source instanceof Uint8Array ? source : new Uint8Array(source);
+  return pdfjsLib.getDocument({
+    data: bytes.slice(),
+    useSystemFonts: true,
+  });
+}
+
+export async function analyzePdfForLibrary(
+  source: PdfBinaryInput,
+  fileName: string,
+  onProgress?: (progress: LibraryPdfAnalysisProgress) => void,
+  signal?: AbortSignal
+): Promise<LibraryPdfAnalysisResult> {
+  if (signal?.aborted) {
+    throw new StorageOperationAbortedError();
+  }
   onProgress?.({
     stage: 'loading',
     currentPage: 0,
     totalPages: 0,
     percent: 5,
-    message: 'Opening PDF document…',
+    message: 'Preparing your document…',
   });
 
-  const loadingTask = pdfjsLib.getDocument({
-    data: bytes.slice(),
-    useSystemFonts: true,
-  });
+  const loadingTask = openPdfDocumentTask(source);
+  const onAbort = () => {
+    void loadingTask.destroy().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   let pdf: pdfjsLib.PDFDocumentProxy;
   try {
     pdf = await loadingTask.promise;
+    if (signal?.aborted) {
+      throw new StorageOperationAbortedError();
+    }
   } catch (err) {
+    signal?.removeEventListener('abort', onAbort);
+    if (err instanceof StorageOperationAbortedError || signal?.aborted) {
+      throw new StorageOperationAbortedError();
+    }
     const name = (err as { name?: string })?.name || '';
     if (name === 'PasswordException') {
       throw new Error('This PDF is password-protected. Please upload an unlocked PDF.');
@@ -339,7 +393,7 @@ export async function analyzePdfForLibrary(
     currentPage: 0,
     totalPages,
     percent: 15,
-    message: 'Checking embedded table of contents…',
+    message: 'Preparing your document…',
   });
 
   const outlineEntries: Array<{
@@ -353,6 +407,7 @@ export async function analyzePdfForLibrary(
     if (Array.isArray(outline) && outline.length > 0) {
       const walkOutline = async (nodes: PdfOutlineItem[], depth: number) => {
         for (const node of nodes) {
+          if (signal?.aborted) throw new StorageOperationAbortedError();
           if (outlineEntries.length >= 60) break;
           const clean = cleanTopicHeadingText(node.title || '');
           if (clean && !isLikelyNoiseHeading(clean)) {
@@ -372,13 +427,25 @@ export async function analyzePdfForLibrary(
       };
       await walkOutline(outline, 0);
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof StorageOperationAbortedError || signal?.aborted) {
+      signal?.removeEventListener('abort', onAbort);
+      await loadingTask.destroy().catch(() => undefined);
+      throw new StorageOperationAbortedError();
+    }
     // Fallback to text heading detection below
   }
 
-  // 2. Scan pages cleanly in batches (even if outline exists, sample first pages for subject & description)
+  // 2. Scan pages cleanly in bounded batches (for large PDFs cap initial scan so UI stays fast)
+  const sourceSize =
+    source instanceof Blob
+      ? source.size
+      : typeof source === 'object' && 'totalBytes' in source
+      ? source.totalBytes
+      : source.byteLength;
+  const maxContentScan = sourceSize > 50 * 1024 * 1024 ? 60 : 140;
   const pagesToScan =
-    outlineEntries.length >= 2 ? Math.min(totalPages, 5) : Math.min(totalPages, 160);
+    outlineEntries.length >= 2 ? Math.min(totalPages, 5) : Math.min(totalPages, maxContentScan);
 
   let totalNonWhitespace = 0;
   let firstPagesSampleText = '';
@@ -390,14 +457,19 @@ export async function analyzePdfForLibrary(
   const unverifiedTocTopics: LibraryTopic[] = [];
 
   for (let p = 1; p <= pagesToScan; p++) {
-    if (p % 6 === 0 || p === pagesToScan) {
+    if (signal?.aborted) {
+      signal?.removeEventListener('abort', onAbort);
+      await loadingTask.destroy().catch(() => undefined);
+      throw new StorageOperationAbortedError();
+    }
+    if (p % 5 === 0 || p === pagesToScan) {
       const pct = Math.min(90, 20 + Math.round((p / pagesToScan) * 68));
       onProgress?.({
         stage: 'scanning_pages',
         currentPage: p,
         totalPages,
         percent: pct,
-        message: `Indexing pages (${p} / ${totalPages})…`,
+        message: `Preparing your document (${p} / ${totalPages})…`,
       });
       await new Promise((r) => setTimeout(r, 0));
     }
@@ -492,6 +564,7 @@ export async function analyzePdfForLibrary(
     isScanned,
   });
 
+  signal?.removeEventListener('abort', onAbort);
   await loadingTask.destroy().catch(() => undefined);
 
   return {
@@ -508,21 +581,18 @@ export async function analyzePdfForLibrary(
 }
 
 export async function runLocalOcrOnPdf(
-  source: Uint8Array | ArrayBuffer,
+  source: PdfBinaryInput,
   options?: {
     maxPagesToScan?: number;
     onProgress?: (progress: LibraryPdfAnalysisProgress) => void;
+    signal?: AbortSignal;
   }
 ): Promise<{
   topics: LibraryTopic[];
   recognizedPages: number;
   note: string;
 }> {
-  const bytes = source instanceof Uint8Array ? source : new Uint8Array(source);
-  const loadingTask = pdfjsLib.getDocument({
-    data: bytes.slice(),
-    useSystemFonts: true,
-  });
+  const loadingTask = openPdfDocumentTask(source);
   const pdf = await loadingTask.promise;
   const totalPages = pdf.numPages;
   const scanLimit = Math.min(totalPages, options?.maxPagesToScan ?? 18);
